@@ -1,0 +1,29 @@
+# VLM RL Forgery Detection — Python dependencies
+#
+# Verified mutually-compatible set on Python 3.12 (macOS / Apple Silicon).
+# Install:  pip install -r requirements.txt
+# Recreating on a different platform? Loosen the `==` pins to `>=` if a wheel
+# isn't available for your OS/Python.
+#
+# System dependency (NOT pip): ffmpeg is needed only by src/extract_frames.sh
+#   macOS:  brew install ffmpeg
+
+# --- Environment + data pipeline ---
+gymnasium==1.3.0
+numpy==1.26.4
+pillow==12.2.0
+datasets==4.8.5
+
+# --- Model + GRPO training ---
+torch==2.12.0
+torchvision==0.27.0   # REQUIRED: transformers 5.x routes image processors through it
+transformers==5.9.0
+trl==1.5.1            # provides GRPOTrainer + custom rollout_func
+peft==0.19.1          # LoRA adapters
+accelerate==1.13.0    # device placement / training backend
+
+# --- Reasoning-trace visualizer (visualize.py) ---
+gradio==6.15.2
+
+# --- Optional: McNemar p-value in evaluate.py (degrades gracefully if absent) ---
+scipy==1.17.1
