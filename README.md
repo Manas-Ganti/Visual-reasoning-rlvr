@@ -1,179 +1,150 @@
-# VLM RL Forgery Detection
+# visual-reasoning-rlvr
 
-Train a Vision-Language Model (VLM) to tell **real photographs** apart from
-**AI-generated images** — not with a single one-shot classification, but through
-**active perception**: the model investigates each image over several turns,
-zooming into regions and requesting forensic metadata, documents its reasoning,
-and only then commits to a verdict. The policy is fine-tuned with
-**GRPO** (Group Relative Policy Optimization) so that *correct, efficient,
-well-reasoned* investigations are reinforced.
+**A verifiable RL environment and full post-training pipeline for investigative
+visual reasoning.**
 
-> 📐 **Full design doc:** [`ARCHITECTURE.md`](ARCHITECTURE.md) — the end-to-end
-> system (data pipeline, Gymnasium environment, agent protocol, GRPO loop,
-> reward structure, and known limitations).
+An agentic RL environment where a VLM investigates an image under a
+resolution/action budget — forming testable hypotheses, inspecting regions to
+confirm or refute them, and committing a verdict — trained so that *reasoning is
+the only efficient path to reward*. The task: decide whether a face is a real
+photograph or AI-generated (StyleGAN2). The point: a reward that is **mechanically
+verifiable end to end — no LLM judge anywhere.**
 
----
-
-## Why active perception?
-
-A downsampled full image often hides the tell-tale signs of synthesis. The
-artifacts that betray a generated image — warped textures, fused or extra
-fingers, garbled text, asymmetric eyes/teeth, melted backgrounds, missing
-camera EXIF — live in *local detail* or in *metadata*. So instead of forcing a
-verdict from one glance, this environment gives the model **tools** and a
-**turn budget**, and rewards it for gathering exactly the evidence it needs
-before deciding. The model learns *how to look*, not just *what to label*.
+> The interesting artifact here is the **reward**, not the detector. See
+> [`results/reward_failure_history.md`](results/reward_failure_history.md) for the
+> four iterations it took to get a signal that is both *faithful* and *learnable*.
 
 ---
 
-## How it works
+## The core idea
 
-Each episode presents one image. The image is divided into a 3×3 grid:
+The environment makes the correct answer **unreachable without reasoning**. The
+agent starts with only a low-resolution overview (partial observability), must
+spend a limited budget to sharpen regions, and must commit a **falsifiable
+hypothesis before each reveal**. A correct final verdict is therefore evidence
+that genuine investigation occurred. Reasoning is forced *structurally* — never
+scored for eloquence.
 
-```
-1 2 3
-4 5 6
-7 8 9
-```
-
-Every turn the model emits a reasoning line and exactly one action:
-
-```
-THOUGHT: <reasoning about what it sees and what to do next>
-ACTION:  <ZOOM n | METADATA | ANSWER AI | ANSWER REAL>
-```
+### Action space (two actions, locked)
 
 | Action | Effect |
-|--------|--------|
-| `ZOOM <1-9>` | inspect a grid cell at higher (upscaled) resolution |
-| `METADATA` | reveal the image's forensic metadata report (EXIF, software signature, color space) |
-| `ANSWER <AI\|REAL>` | commit a verdict and end the episode |
+|---|---|
+| `INSPECT <n>` | reveal grid cell *n* (1–16, a 4×4 grid) at high resolution — the only information-acquisition action; costs budget |
+| `VERDICT <AI\|REAL> confidence=<c>` | commit and end the episode |
 
-The sequence of `THOUGHT`s across the turns forms a **chain of reasoning** that
-culminates in the final `ANSWER`. The parser (`src/utils.py`) is deliberately
-tolerant — case-insensitive, accepts `ZOOM(5)`, honors only the last `ACTION`
-line, and normalizes verdict synonyms — so a slightly malformed completion is
-still usable instead of wasting the rollout.
+### Predict-then-verify (the locked invariant)
 
----
+Every turn is one structured block. The **hypothesis is committed before the
+reveal**; the reveal is reconciled against it on the next turn. Predict → observe,
+never observe → narrate.
 
-## Reward design (high level)
-
-Reward is computed inside `ForgeryDetectionEnv.step` and parameterized by a
-`RewardConfig` dataclass, so the scheme can be tuned without touching the
-rollout or training code. The signals:
-
-- **Terminal correctness** — `+1.0` correct verdict, `−1.0` wrong.
-- **Investigation cost** — small per-action step cost (efficiency).
-- **Action validity / redundancy** — penalties for malformed actions and
-  re-zooming an already-viewed cell.
-- **Budget exhaustion** — penalty for running out of turns without answering.
-- **Metadata-shortcut penalty** — the simulated metadata is label-correlated, so
-  a *correct verdict reached after using `METADATA`* is docked, pushing the
-  policy to discriminate from pixels alone while still keeping such answers
-  net-positive.
-- **Reasoning-presence reward (live)** — a small per-turn bonus for a
-  substantive, non-boilerplate `THOUGHT`, so the reasoning channel doesn't
-  collapse under outcome-only credit assignment.
-- **Judged reasoning quality (stubbed, off by default)** — an optional,
-  correctness-gated bonus from a separate VLM judge that scores whether the
-  final reasoning is grounded and coherent; it can only break ties between
-  correct answers, never reward an eloquent wrong one.
-
-See [`ARCHITECTURE.md` §5](ARCHITECTURE.md) for the full table, default weights,
-and the rationale behind each lever.
-
----
-
-## Repository layout
-
-```text
-vlm-rl-forgery-detection/
-├── data/                     # storage layer (gitignored)
-│   ├── processed_images/     # standardized lossless RGB PNGs
-│   ├── raw_data/             # source videos / images (Sora frames, real photos)
-│   └── metadata.jsonl        # dataset catalog (one JSON record per image)
-├── src/
-│   ├── dataset_builder.py    # ingestion, standardization, metadata pairing
-│   ├── sort_data.py          # local corpus build + metadata injection
-│   ├── extract_frames.sh     # ffmpeg frame extraction from source video
-│   ├── environment.py        # Gymnasium env: episode state machine + reward
-│   ├── prompt_templates.py   # system grounding, tool specs, output format
-│   ├── utils.py              # 3×3 crop math + tolerant action/thought parsers
-│   └── trace_logger.py       # per-episode reasoning-trace logging
-├── train_grpo.py             # multi-turn GRPO rollout + LoRA fine-tuning (TRL)
-├── evaluate.py               # base VLM vs RL policy benchmark (+ McNemar test)
-├── visualize.py              # Gradio reasoning-trace replay viewer
-├── ARCHITECTURE.md           # full design document
-└── requirements.txt          # pinned, mutually-compatible dependency set
+```
+RECONCILIATION: CONFIRMED/REFUTED — did the last reveal match my hypothesis?   (post)
+BELIEF_UPDATE:  P(fake)=0.75 because …                                          (post)
+OBSERVATION:    what I perceive at current resolution                           (pre)
+REASONING:      why this region matters / my uncertainty                        (pre)
+HYPOTHESIS:     if AI, the left iris in cell 6 will be malformed                (pre)
+ACTION:         INSPECT 6   |   VERDICT AI confidence=0.85
 ```
 
----
+## The verifiable reward
 
-## Setup
+Every term is a mechanical function of the trajectory + ground-truth label
+(`env/reward.py`, unit-tested in `tests/`):
 
-Requires **Python 3.12** (pins verified on macOS / Apple Silicon). `ffmpeg` is
-needed only for frame extraction from source video (`brew install ffmpeg`).
-
-```bash
-pip install -r requirements.txt
+```
+R = +1.00·verdict_correct        final label vs ground truth
+    +0.30·belief_coherence       P(fake) moved as the agent's own reconciliations imply
+    +0.30·verdict_consistency    the final call follows the accumulated evidence
+    +0.10·prediction_tracking    (soft) fraction of hypotheses confirmed
+    −0.05·per_inspect            budget pressure → hypothesis-driven, not exhaustive
+    −0.50·confident_wrong·conf    calibration pressure → hedge when indistinguishable
+    −1.00·no_answer
 ```
 
-A CUDA GPU is effectively required to actually *train*; data prep, the
-environment smoke test, and a training dry run all run CPU-only. The default
-policy model is the small `HuggingFaceTB/SmolVLM-500M-Instruct` (trainable on
-modest hardware); swap in `Qwen/Qwen2.5-VL-3B-Instruct` or larger on a CUDA box
-via `--model`. Fine-tuning uses **LoRA**.
+`verdict_correct` dominates so process credit can never rescue a confidently-wrong
+episode. The reward reads only numeric beliefs and reconciliation *direction* —
+never prose — so boilerplate reasoning earns nothing. Full rationale + the
+reward-hacking surface: [`results/reward_failure_history.md`](results/reward_failure_history.md).
+
+## Difficulty (two honest axes)
+
+Single-generator data (StyleGAN2) gives no generator tiers, so difficulty is
+manufactured two ways: **image degradation** (`clean → jpeg → blur_downscale`) and
+**budget tightness** (fewer allowed inspects). The eval harness reports pass rate
+across both — the calibration deliverable: *"to target model X at ~50% pass, use
+degradation Y at budget k."*
+
+## Pipeline
+
+| Stage | What | Script |
+|---|---|---|
+| 0 | Baseline eval (zero-shot pass rate per degradation) | `eval/harness.py` |
+| 1 | **SFT** — teach the pre/post format from distilled traces | `training/sft.py` |
+| 2 | **GRPO** — online RL vs the verifiable reward, KL-anchored to SFT | `training/grpo.py` |
+| 3 | **Verification** — prove the gains are real (below) | `eval/harness.py` |
+
+Base model **Qwen2-VL-7B-Instruct** (fallback 2B). Inference via **vLLM**
+(eval + trace distillation); training rollouts via HF `generate` (needs logprobs).
+All stages logged to **W&B**. DPO was cut — data-starved at this scale;
+SFT→GRPO suffices.
+
+### Headline result (populate after runs)
+
+Pass rate per stage × degradation, `test` split:
+
+| Stage | clean | jpeg | blur_downscale |
+|---|---|---|---|
+| Baseline | – | – | – |
+| SFT | – | – | – |
+| GRPO | – | – | – |
+
+### Stage 3 — proving the learning is real
+
+Held-out degradation · trajectory audit (`demo/app.py`) · grounding-term ablation
+· adversarial-trajectory probe (unit-tested) · calibration curve · evidence slice
+(GradCAM-proposed, human-verified fake cells; eval-only) — do RL rollouts inspect
+true-artifact cells more than SFT? Indistinguishable images are scoped out of that
+metric but still counted in accuracy.
 
 ---
 
 ## Quickstart
 
 ```bash
-# 1. Build the standardized image corpus + metadata manifest
-python src/dataset_builder.py
+pip install -r requirements.txt            # CORE profile is CPU-only
 
-# 2. Smoke-test the environment with a scripted policy (prints transitions)
-python src/environment.py
+# --- runs anywhere (no GPU) ---
+pytest tests/                              # verifiable-reward + trajectory + env tests
+python -m env.environment                  # scripted-policy smoke test (+ reward breakdown)
 
-# 3. Run the GRPO fine-tuning loop
-python train_grpo.py
+# --- data (needs Kaggle creds) ---
+python data/build_manifest.py              # → data/manifest.jsonl (+ data/images/)
 
-# 4. Benchmark base VLM vs the RL-fine-tuned policy
-python evaluate.py
+# --- A100 ---
+python data/build_sft_traces.py --limit 800   # distill Stage-1 traces from base Qwen2-VL
+python training/sft.py                          # Stage 1
+python training/grpo.py --sft-checkpoint checkpoints/sft-qwen2vl   # Stage 2
+python eval/harness.py --adapter checkpoints/grpo-qwen2vl \
+    --budgets 2,4 --degradations clean,jpeg,blur_downscale --compare-base
 
-# 5. (optional) Replay episode reasoning traces in a browser
-python visualize.py
+# --- demo ---
+python demo/app.py --log logs/grpo_episodes.jsonl
 ```
 
----
+## Repository
 
-## Training & evaluation
+```
+env/         environment.py · reward.py · trajectory.py · grid.py · prompts.py · trace_logger.py
+data/        build_manifest.py · degradation.py · build_sft_traces.py · build_evidence_slice.py · curation.md
+training/    common.py · sft.py · grpo.py
+eval/        harness.py               (pass-rate × degradation × budget, calibration, evidence slice)
+tests/       test_reward.py · test_trajectory.py · test_environment.py   (CI target)
+demo/        app.py                   (Gradio step-by-step trajectory viewer)
+results/     reward_failure_history.md · curves/tables
+Dockerfile · .github/workflows/ci.yml
+```
 
-- **Algorithm:** GRPO via TRL's `GRPOTrainer`. A custom `rollout_func` makes each
-  GRPO "completion" a full multi-turn episode; the dataset row is just a seed
-  carrying the manifest index, and the per-episode scalar return is fed straight
-  through as the reward. GRPO normalizes returns *within each group of rollouts
-  of the same image*, so reward **spread across rollouts** matters more than
-  absolute magnitude.
-- **Policy:** SmolVLM-500M (default) + LoRA adapter; precision follows the device
-  (bf16 on CUDA, fp16 on MPS, fp32 on CPU).
-- **Evaluation:** `evaluate.py` runs the untrained base model and the fine-tuned
-  policy through the *same* environment and compares accuracy, with a McNemar
-  test for paired significance (degrades gracefully if SciPy is absent).
-
----
-
-## Known limitations
-
-- **Reward design is not finalized** — `RewardConfig` is a tunable hook. The
-  reasoning-presence reward is live but untested in training and its weight needs
-  tuning against the correctness scale; the judged-reasoning reward is stubbed
-  behind a flag and needs a real VLM judge wired in.
-- **Synthetic metadata leakage** — manifest metadata can be label-correlated, so
-  the `METADATA` tool is a potential shortcut; mitigated by both a data-side
-  informativeness knob and the reward-side metadata-shortcut penalty.
-- **Multi-turn token masking** — the masking convention for interleaved
-  tool-result tokens must be validated against the installed TRL version.
-
-See [`ARCHITECTURE.md` §9](ARCHITECTURE.md) for details.
+Substrate: [Fake-Vs-Real-Faces (Hard)](https://www.kaggle.com/datasets/hamzaboulahia/hardfakevsrealfaces)
+— 1,288 300×300 images (700 StyleGAN2 fakes, 589 real), image-level labels only.
+See [`data/curation.md`](data/curation.md).

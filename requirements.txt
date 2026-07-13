@@ -1,29 +1,32 @@
-# VLM RL Forgery Detection — Python dependencies
+# visual-reasoning-rlvr — Python dependencies
 #
-# Verified mutually-compatible set on Python 3.12 (macOS / Apple Silicon).
-# Install:  pip install -r requirements.txt
-# Recreating on a different platform? Loosen the `==` pins to `>=` if a wheel
-# isn't available for your OS/Python.
+# Two install profiles:
+#   * CORE (env + reward + tests + demo): CPU-only, no GPU needed. This is what
+#     CI installs to run the reward tests. Everything above the TRAINING marker.
+#   * TRAINING/INFERENCE (SFT, GRPO, vLLM, distillation): needs a CUDA GPU
+#     (A100 target). Everything below.
 #
-# System dependency (NOT pip): ffmpeg is needed only by src/extract_frames.sh
-#   macOS:  brew install ffmpeg
+# The ML stack is intentionally lower-bounded (>=) rather than pinned so it
+# resolves against whatever CUDA/torch build the A100 host provides; pin exact
+# versions in the Dockerfile for reproducibility.
 
-# --- Environment + data pipeline ---
-gymnasium==1.3.0
-numpy==1.26.4
-pillow==12.2.0
-datasets==4.8.5
+# ------------------------- CORE (CPU, CI) ------------------------- #
+gymnasium>=1.0
+numpy>=1.26,<2.3
+pillow>=10.0
+pytest>=8.0
+gradio>=5.0          # demo/app.py trajectory viewer
+scipy>=1.11          # optional: McNemar p-value in eval/harness.py
 
-# --- Model + GRPO training ---
-torch==2.12.0
-torchvision==0.27.0   # REQUIRED: transformers 5.x routes image processors through it
-transformers==5.9.0
-trl==1.5.1            # provides GRPOTrainer + custom rollout_func
-peft==0.19.1          # LoRA adapters
-accelerate==1.13.0    # device placement / training backend
-
-# --- Reasoning-trace visualizer (visualize.py) ---
-gradio==6.15.2
-
-# --- Optional: McNemar p-value in evaluate.py (degrades gracefully if absent) ---
-scipy==1.17.1
+# --------------------- TRAINING / INFERENCE (CUDA) --------------------- #
+torch>=2.4
+torchvision>=0.19    # transformers routes image processors through it
+transformers>=4.49   # Qwen2-VL support
+trl>=0.29            # GRPOTrainer + custom rollout_func; SFTTrainer (vision)
+peft>=0.13           # LoRA adapters
+accelerate>=1.0
+datasets>=3.0
+vllm>=0.6            # fast offline inference for eval + SFT-trace distillation
+wandb>=0.18          # experiment logging (all stages)
+kagglehub>=0.3       # dataset download in data/build_manifest.py
+qwen-vl-utils>=0.0.8 # Qwen2-VL image preprocessing helpers

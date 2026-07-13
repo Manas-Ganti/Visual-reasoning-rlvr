@@ -1,6 +1,6 @@
 """Append episode traces to a JSONL file for offline browser replay.
 
-Training and evaluation produce one :meth:`ForgeryDetectionEnv.get_trace` dict
+Training and evaluation produce one :meth:`InvestigationEnv.get_trace` dict
 per episode; this writer appends them to a log. GRPO emits ``G`` rollouts per
 prompt across many steps, so training logging is *sampled* (``sample_every``) to
 keep the file manageable. The visualizer reads the log back with :meth:`load`.
