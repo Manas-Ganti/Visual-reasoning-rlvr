@@ -1,5 +1,11 @@
-# --- Project data & local config (requested) ---
-data/
+# --- Data blobs (source under data/ IS tracked; images/manifests are not) ---
+# Covers manifest.jsonl, sft_traces.jsonl, evidence_slice*.jsonl, legacy metadata.jsonl
+data/images/
+data/processed_images/
+data/raw_data/
+data/*.jsonl
+
+# --- Local config ---
 .claude/
 
 # --- Scratch notes (not for version control) ---
@@ -8,6 +14,8 @@ discussion.md
 # --- Model / run artifacts ---
 checkpoints/
 logs/
+results/*.png
+wandb/
 
 # --- Python ---
 __pycache__/
@@ -15,7 +23,7 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
-env/
+env-venv/
 
 # --- OS / editor cruft ---
 .DS_Store

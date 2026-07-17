@@ -1,0 +1,29 @@
+name: ci
+
+# Runs the verifiable-reward + trajectory + environment unit tests on every push
+# and PR. CPU-only: the CORE dependency profile pulls in no GPU/ML stack, so this
+# is fast and green without a runner GPU. This is the guardrail on the reward —
+# the piece most prone to silent regressions when weights or parsing change.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  reward-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # CORE profile only — env + reward + trajectory need just numpy/pillow/gymnasium.
+      - name: Install core deps
+        run: pip install "gymnasium>=1.0" "numpy>=1.26,<2.3" "pillow>=10.0" "pytest>=8.0"
+
+      - name: Run tests
+        run: python -m pytest tests/ -q
