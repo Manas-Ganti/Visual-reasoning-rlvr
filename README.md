@@ -14,6 +14,15 @@ verifiable end to end — no LLM judge anywhere.**
 > [`results/reward_failure_history.md`](results/reward_failure_history.md) for the
 > four iterations it took to get a signal that is both *faithful* and *learnable*.
 
+![One investigative episode: the agent starts on a low-resolution overview, spends its inspect budget to sharpen 4×4 cells, commits a falsifiable hypothesis before each reveal, and reconciles it afterward.](docs/trajectory_demo.gif)
+
+*A single episode on a Qwen2.5-VL-32B policy. The overview is deliberately
+unresolvable — each `INSPECT` sharpens one cell, and the numbered badges are the
+inspect order. The right panel is the structured block the model emitted; the
+reward reads only its machine-checkable fields (`P(fake)`, reconciliation
+direction, verdict, confidence), never the prose. Regenerate with
+`python tools/traces_to_demo.py && python tools/make_demo_gif.py`.*
+
 ---
 
 ## The core idea
@@ -84,10 +93,11 @@ degradation Y at budget k."*
 | 2 | **GRPO** — online RL vs the verifiable reward, KL-anchored to SFT | `training/grpo.py` |
 | 3 | **Verification** — prove the gains are real (below) | `eval/harness.py` |
 
-Base model **Qwen2-VL-7B-Instruct** (fallback 2B). Inference via **vLLM**
-(eval + trace distillation); training rollouts via HF `generate` (needs logprobs).
-All stages logged to **W&B**. DPO was cut — data-starved at this scale;
-SFT→GRPO suffices.
+Base model **Qwen2.5-VL-32B-Instruct** (`--model 7b | 32b | 72b | auto`).
+Inference via **vLLM** with tensor parallelism (eval + trace distillation);
+training rollouts via HF `generate` (needs logprobs). Training is data-parallel
+across GPUs/nodes with **DeepSpeed ZeRO** sharding inside the group. All stages
+logged to **W&B**. DPO was cut — data-starved at this scale; SFT→GRPO suffices.
 
 ### Headline result (populate after runs)
 
@@ -121,24 +131,124 @@ python -m env.environment                  # scripted-policy smoke test (+ rewar
 # --- data (needs Kaggle creds) ---
 python data/build_manifest.py              # → data/manifest.jsonl (+ data/images/)
 
-# --- A100 ---
-python data/build_sft_traces.py --limit 800   # distill Stage-1 traces from base Qwen2-VL
-python training/sft.py                          # Stage 1
-python training/grpo.py --sft-checkpoint checkpoints/sft-qwen2vl   # Stage 2
-python eval/harness.py --adapter checkpoints/grpo-qwen2vl \
+# --- single GPU (7B tier, smoke runs) ---
+python data/build_sft_traces.py --model 7b --limit 200
+python training/sft.py  --model 7b
+python training/grpo.py --model 7b --sft-checkpoint checkpoints/sft-qwen2.5-vl-7b
+python eval/harness.py  --model 7b --adapter checkpoints/grpo-qwen2.5-vl-7b --compare-base
+
+# --- one 8-GPU node (32B tier) ---
+python data/build_sft_traces.py --backend vllm --tensor-parallel-size 8 \
+    --batch-episodes 32 --limit 1200                              # distill (vLLM TP)
+accelerate launch --config_file configs/accelerate_ds_zero2.yaml \
+    training/sft.py --model 32b                                   # Stage 1
+accelerate launch --config_file configs/accelerate_ds_zero2.yaml \
+    training/grpo.py --sft-checkpoint checkpoints/sft-qwen2.5-vl-32b   # Stage 2
+python eval/harness.py --backend vllm --tensor-parallel-size 8 --batch-episodes 32 \
+    --adapter checkpoints/grpo-qwen2.5-vl-32b \
     --budgets 2,4 --degradations clean,jpeg,blur_downscale --compare-base
+
+# --- SLURM (VT ARC: TinkerCliffs A100 / Falcon H200) ---
+sbatch scripts/arc_sft.slurm                                # 32B, 1 node, ZeRO-2
+MODEL=72b DS=configs/deepspeed_zero3.json sbatch --nodes=2 scripts/arc_sft.slurm
+SFT_CKPT=checkpoints/sft-qwen2.5-vl-32b sbatch scripts/arc_grpo.slurm   # 32B, 2 nodes, ZeRO-2
+SFT_CKPT=checkpoints/sft-qwen2.5-vl-32b sbatch --nodes=1 scripts/arc_grpo.slurm  # ~2× wall clock
+JOB=eval ADAPTER=checkpoints/grpo-qwen2.5-vl-32b sbatch scripts/arc_infer.slurm
 
 # --- demo ---
 python demo/app.py --log logs/grpo_episodes.jsonl
 ```
+
+## Monitoring a run (W&B)
+
+**One-time setup on the login node** (`wandb` is already in the TRAINING profile
+of `requirements.txt`):
+
+```bash
+conda activate vrr
+wandb login                 # writes ~/.netrc; $HOME is mounted on the compute
+                            # nodes, so jobs inherit the credential
+```
+
+Prefer `~/.netrc` over an env var — the key never enters the repo or a job
+script. If you would rather use a variable, put it *outside* the repo in
+`~/.config/vrr/secrets.env` (`export WANDB_API_KEY=...`, `chmod 600`);
+`scripts/arc_env.sh` sources that file if it exists. **Never put the key in
+`arc_env.sh` — it is tracked in git.**
+
+`arc_env.sh` then preflights the credential and the route to `api.wandb.ai` and
+exports `WANDB_MODE` accordingly. No credential or no outbound route (common on
+HPC compute nodes) falls back to `offline` instead of failing or hanging the job:
+
+```bash
+# check from a compute node BEFORE burning an allocation
+srun --partition=a100_normal_q --gres=gpu:0 --time=00:05:00 --pty \
+  curl -s -o /dev/null -w '%{http_code}\n' https://api.wandb.ai/graphql   # 405 = reachable, 000 = blocked
+# if it was offline, replay the run afterwards from the login node:
+wandb sync /projects/$USER/wandb/offline-run-*
+```
+
+
+Long SLURM jobs are meant to be followed from the W&B dashboard, not from an SSH
+session on the compute node. Both training scripts call `common.wandb_init`,
+which stamps the run with its SLURM identity (`slurm_job_id`, `slurm_nodelist`,
+`slurm_partition`, `num_nodes`, `world_size`) and names it
+`grpo-Qwen2.5-VL-32B-Instruct-j<jobid>`. The run id is keyed on the SLURM job id,
+so a **requeued job re-attaches to the same run** rather than fragmenting the
+charts. Rank 0 prints the run URL to `logs/slurm/grpo-<jobid>.out` at startup.
+
+Alongside the usual loss / `rollout/*` metrics, `common.progress_callback` logs:
+
+| Metric | Reads as |
+|---|---|
+| `progress/pct_complete`, `progress/global_step` | how far in |
+| `progress/sec_per_step` | EMA-smoothed step time (first step excluded — it carries warmup) |
+| `progress/eta_hours`, `progress/finish_unixtime` | **time left**, and projected finish |
+| `progress/walltime_left_hours` | time until SLURM kills the job (from `scontrol EndTime`) |
+| `progress/walltime_margin_hours` | ETA vs. that deadline — **negative means it will not finish** |
+| `progress/will_finish` | the same as a 1/0 line to alert on |
+
+`wandb.run.summary["progress/eta"]` holds the projected finish as a timestamp, so
+it is visible in the runs table without opening a chart. When the margin first
+goes negative the run fires a **`wandb.alert`** — that is the signal to requeue
+with more nodes or cap `--max-steps`, and it reaches you without an SSH session.
+Off SLURM (or without `scontrol`) the walltime rows are simply omitted; the ETA
+rows still work.
+
+## Scaling notes
+
+| Tier | Weights (bf16) | Training shape | Inference shape |
+|---|---|---|---|
+| `7b` | ~17 GB | 1 GPU, LoRA | 1 GPU |
+| `32b` | ~66 GB | 8×A100-80 / H200, LoRA + **ZeRO-2** | vLLM TP=4–8 |
+| `72b` | ~147 GB | 8–16 GPUs, LoRA + **ZeRO-3** (`_offload` if tight) | vLLM TP=8 |
+
+* **Training** is data-parallel: accelerate shards the seed dataset across ranks,
+  each rank runs its own `InvestigationEnv` and rollouts, gradients are reduced.
+  GRPO stays on **ZeRO-2** by default — every rollout turn calls `generate()`, and
+  ZeRO-3 gathers the sharded parameters once per turn (handled correctly via
+  `unwrap_model_for_generation`, just slower).
+* **Inference** picks one of two parallelisms, never both: vLLM **tensor
+  parallel** (one big replica across the node, episodes advanced in lockstep by
+  `run_episodes_batched`) or **rank sharding** under `torchrun` (one replica per
+  GPU, test split strided across ranks and all-gathered). The evidence slice
+  reads next-token logits, so it is HF/rank-sharded only.
+* `--compare-base` disables the LoRA adapter instead of loading a second model —
+  the base/policy comparison costs one replica's VRAM, not two.
+* The visual-token budget (`DEFAULT_MIN_PIXELS` / `DEFAULT_MAX_PIXELS` in
+  `training/common.py`) caps each image at 256–1280 patch tokens; an episode
+  carries the overview plus every reveal, so this is the knob that keeps a
+  4-inspect context inside ~8k tokens at 32B/72B.
 
 ## Repository
 
 ```
 env/         environment.py · reward.py · trajectory.py · grid.py · prompts.py · trace_logger.py
 data/        build_manifest.py · degradation.py · build_sft_traces.py · build_evidence_slice.py · curation.md
-training/    common.py · sft.py · grpo.py
+training/    common.py · vllm_backend.py · sft.py · grpo.py
 eval/        harness.py               (pass-rate × degradation × budget, calibration, evidence slice)
+configs/     accelerate_ds_zero{2,3}.yaml · accelerate_fsdp.yaml · deepspeed_zero{2,3,3_offload}.json
+scripts/     arc_env.sh · arc_sft.slurm · arc_grpo.slurm · arc_infer.slurm   (VT ARC SLURM)
 tests/       test_reward.py · test_trajectory.py · test_environment.py   (CI target)
 demo/        app.py                   (Gradio step-by-step trajectory viewer)
 results/     reward_failure_history.md · curves/tables
