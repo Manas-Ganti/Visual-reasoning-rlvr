@@ -28,10 +28,12 @@ from env import grid  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-W, H = 1120, 566
+W = 1360
 IMG = 512                      # image panel edge
-PAD = 22
-TEXT_X = IMG + 2 * PAD + 8
+PAD = 24
+TEXT_X = IMG + 2 * PAD + 10
+TEXT_W = W - TEXT_X - PAD      # pixels available for wrapped prose
+LEAD = 21                      # line leading for body text
 
 BG = (18, 20, 24)
 FG = (232, 234, 238)
@@ -97,18 +99,65 @@ def draw_panel(img: Image.Image, turns, upto: int, grid_n: int) -> Image.Image:
     return img
 
 
-def wrap(d, x, y, text, f, fill, width_chars, max_lines=None, leading=19):
-    lines = textwrap.wrap(text, width=width_chars) or [""]
-    if max_lines and len(lines) > max_lines:
-        lines = lines[:max_lines]
-        lines[-1] = lines[-1].rstrip(" .,") + " …"
-    for ln in lines:
-        d.text((x, y), ln, font=f, fill=fill)
-        y += leading
-    return y
+def wrap_px(text: str, f, max_px: int) -> list[str]:
+    """Greedy wrap on measured pixel width — never truncates."""
+    words, lines, cur = text.split(), [], ""
+    for w in words:
+        trial = f"{cur} {w}".strip()
+        if f.getbbox(trial) and f.getbbox(trial)[2] > max_px and cur:
+            lines.append(cur)
+            cur = w
+        else:
+            cur = trial
+    if cur:
+        lines.append(cur)
+    return lines or [""]
 
 
-def frame(ep, turn_no: int, base: Image.Image, grid_n: int) -> Image.Image:
+def blocks(ep, t) -> list[tuple]:
+    """The panel as (kind, caption, payload) blocks, so height can be measured
+    before anything is drawn. Every field is rendered in full."""
+    out = [("title", None, f"Turn ?"), ("sub", None, f"ground truth: {ep['ground_truth']}")]
+    if t.get("reconciliation") and t["reconciliation"] != "unclear":
+        out.append(("recon", "RECONCILIATION", t["reconciliation"].upper()))
+    if t.get("p_fake") is not None:
+        out.append(("belief", "BELIEF", float(t["p_fake"])))
+    for label in ("observation", "reasoning", "hypothesis"):
+        if t.get(label):
+            cap = {"hypothesis": "HYPOTHESIS (pre-reveal)"}.get(label, label.upper())
+            out.append(("prose", cap, t[label]))
+    act = t.get("action_type", "?")
+    if act == "inspect":
+        out.append(("action", "ACTION", (f"INSPECT {t.get('cell')}", ACCENT)))
+    elif act == "verdict":
+        col = OK if t.get("verdict") == ep["ground_truth"] else BAD
+        out.append(("action", "ACTION",
+                    (f"VERDICT {t.get('verdict')}  confidence={t.get('confidence')}", col)))
+    else:
+        out.append(("action", "ACTION", (act, DIM)))
+    return out
+
+
+def panel_height(bl, body) -> int:
+    """Pixel height the text column needs, measured not guessed."""
+    y = PAD + 20
+    for kind, _cap, payload in bl:
+        if kind == "title":
+            y += 38
+        elif kind == "sub":
+            y += 32
+        elif kind == "recon":
+            y += 18 + 26
+        elif kind == "belief":
+            y += 18 + 28
+        elif kind == "prose":
+            y += 18 + LEAD * len(wrap_px(payload, body, TEXT_W)) + 10
+        elif kind == "action":
+            y += 20 + 18 + 26
+    return y + PAD
+
+
+def frame(ep, turn_no: int, base: Image.Image, grid_n: int, height: int) -> Image.Image:
     turns = ep["turns"]
     t = turns[turn_no - 1]
     revealed = [x["cell"] for x in turns[:turn_no]
@@ -117,57 +166,44 @@ def frame(ep, turn_no: int, base: Image.Image, grid_n: int) -> Image.Image:
     # the visible image lags the badge by one cell.
     view = visible_image(base, revealed[:-1] if t.get("action_type") == "inspect" else revealed, grid_n)
 
-    canvas = Image.new("RGB", (W, H), BG)
+    canvas = Image.new("RGB", (W, height), BG)
     canvas.paste(draw_panel(view, turns, turn_no, grid_n), (PAD, PAD + 26))
     d = ImageDraw.Draw(canvas)
-
     d.text((PAD, 14), "visual-reasoning-rlvr — investigative episode",
            font=font(17, bold=True), fill=DIM)
 
-    x, y = TEXT_X, PAD + 20
-    d.text((x, y), f"Turn {turn_no} / {len(turns)}", font=font(24, bold=True), fill=FG)
-    y += 38
-
-    d.text((x, y), f"ground truth: {ep['ground_truth']}", font=font(15), fill=DIM)
-    y += 30
-
     small, body = font(14, bold=True), font(15)
-    wc = 60
+    x, y = TEXT_X, PAD + 20
 
-    if t.get("reconciliation") and t["reconciliation"] != "unclear":
-        col = OK if t["reconciliation"] == "confirmed" else BAD
-        d.text((x, y), "RECONCILIATION", font=small, fill=DIM); y += 18
-        d.text((x, y), t["reconciliation"].upper(), font=font(16, bold=True), fill=col); y += 26
-
-    if t.get("p_fake") is not None:
-        d.text((x, y), "BELIEF", font=small, fill=DIM); y += 18
-        pf = float(t["p_fake"])
-        d.text((x, y), f"P(fake) = {pf:.2f}", font=font(16, bold=True), fill=FG)
-        bx, bw = x + 150, 260
-        d.rectangle([bx, y + 4, bx + bw, y + 14], fill=(48, 52, 60))
-        d.rectangle([bx, y + 4, bx + int(bw * pf), y + 14], fill=ACCENT)
-        y += 28
-
-    for label in ("observation", "reasoning", "hypothesis"):
-        if not t.get(label):
-            continue
-        cap = {"hypothesis": "HYPOTHESIS (pre-reveal)"}.get(label, label.upper())
-        d.text((x, y), cap, font=small, fill=DIM); y += 18
-        y = wrap(d, x, y, t[label], body, FG, wc, max_lines=3) + 8
-
-    act = t.get("action_type", "?")
-    if act == "inspect":
-        txt, col = f"INSPECT {t.get('cell')}", ACCENT
-    elif act == "verdict":
-        ok = t.get("verdict") == ep["ground_truth"]
-        txt = f"VERDICT {t.get('verdict')}  confidence={t.get('confidence')}"
-        col = OK if ok else BAD
-    else:
-        txt, col = act, DIM
-
-    y = max(y, H - 62)
-    d.text((x, y), "ACTION", font=small, fill=DIM)
-    d.text((x, y + 18), txt, font=font(19, bold=True), fill=col)
+    for kind, cap, payload in blocks(ep, t):
+        if kind == "title":
+            d.text((x, y), f"Turn {turn_no} / {len(turns)}", font=font(24, bold=True), fill=FG)
+            y += 38
+        elif kind == "sub":
+            d.text((x, y), payload, font=font(15), fill=DIM)
+            y += 32
+        elif kind == "recon":
+            col = OK if payload == "CONFIRMED" else BAD
+            d.text((x, y), cap, font=small, fill=DIM); y += 18
+            d.text((x, y), payload, font=font(16, bold=True), fill=col); y += 26
+        elif kind == "belief":
+            d.text((x, y), cap, font=small, fill=DIM); y += 18
+            d.text((x, y), f"P(fake) = {payload:.2f}", font=font(16, bold=True), fill=FG)
+            bx, bw = x + 155, 300
+            d.rectangle([bx, y + 4, bx + bw, y + 14], fill=(48, 52, 60))
+            d.rectangle([bx, y + 4, bx + int(bw * payload), y + 14], fill=ACCENT)
+            y += 28
+        elif kind == "prose":
+            d.text((x, y), cap, font=small, fill=DIM); y += 18
+            for ln in wrap_px(payload, body, TEXT_W):
+                d.text((x, y), ln, font=body, fill=FG); y += LEAD
+            y += 10
+        elif kind == "action":
+            text, col = payload
+            y += 20
+            d.text((x, y), cap, font=small, fill=DIM)
+            d.text((x, y + 18), text, font=font(19, bold=True), fill=col)
+            y += 44
     return canvas
 
 
@@ -207,6 +243,8 @@ def main():
     ap.add_argument("--ms", type=int, default=2600, help="ms per turn frame")
     ap.add_argument("--hold", type=int, default=4200, help="ms on the verdict frame")
     ap.add_argument("--colors", type=int, default=128)
+    ap.add_argument("--frames", action="store_true",
+                    help="Also write per-turn PNGs next to the GIF.")
     ap.add_argument("--list", action="store_true")
     args = ap.parse_args()
 
@@ -226,9 +264,23 @@ def main():
 
     base = Image.open(ep["image_path"]).convert("RGB")
     grid_n = ep.get("grid", 4)
-    frames = [frame(ep, i, base, grid_n) for i in range(1, len(ep["turns"]) + 1)]
+
+    # GIF frames must share one size, so take the tallest turn — every field is
+    # rendered in full, nothing is clipped or elided.
+    body = font(15)
+    height = max(
+        max(panel_height(blocks(ep, t), body) for t in ep["turns"]),
+        IMG + 2 * PAD + 26,
+    )
+    frames = [frame(ep, i, base, grid_n, height) for i in range(1, len(ep["turns"]) + 1)]
 
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
+    if args.frames:
+        fdir = os.path.join(os.path.dirname(args.out), "frames")
+        os.makedirs(fdir, exist_ok=True)
+        for i, f in enumerate(frames, start=1):
+            f.save(os.path.join(fdir, f"turn_{i}.png"))
+        print(f"wrote {len(frames)} PNG frames to {fdir}")
     durations = [args.ms] * (len(frames) - 1) + [args.hold]
     frames = [f.quantize(colors=args.colors, method=Image.MEDIANCUT) for f in frames]
     frames[0].save(args.out, save_all=True, append_images=frames[1:],

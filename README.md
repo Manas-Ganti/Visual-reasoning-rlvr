@@ -20,8 +20,9 @@ verifiable end to end — no LLM judge anywhere.**
 unresolvable — each `INSPECT` sharpens one cell, and the numbered badges are the
 inspect order. The right panel is the structured block the model emitted; the
 reward reads only its machine-checkable fields (`P(fake)`, reconciliation
-direction, verdict, confidence), never the prose. Regenerate with
-`python tools/traces_to_demo.py && python tools/make_demo_gif.py`.*
+direction, verdict, confidence), never the prose. Per-turn stills are in
+[`docs/frames/`](docs/frames). Regenerate with `python tools/traces_to_demo.py &&
+python tools/make_demo_gif.py --frames`.*
 
 ---
 
