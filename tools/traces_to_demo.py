@@ -22,6 +22,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from env.trajectory import parse_turn  # noqa: E402
+from training import common  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -33,11 +34,16 @@ def load_manifest(path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--traces", default=os.path.join(REPO, "data", "sft_traces.jsonl"))
-    ap.add_argument("--manifest", default=os.path.join(REPO, "data", "manifest.jsonl"))
-    ap.add_argument("--out", default=os.path.join(REPO, "logs", "distill_episodes.jsonl"))
+    ap.add_argument("--dataset", default=common.DATASET)
+    ap.add_argument("--traces", default=None)
+    ap.add_argument("--manifest", default=None)
+    ap.add_argument("--out", default=None)
     ap.add_argument("--grid", type=int, default=4)
     args = ap.parse_args()
+    args.traces = args.traces or common.traces_path(args.dataset)
+    args.manifest = args.manifest or common.manifest_path(args.dataset)
+    args.out = args.out or os.path.join(common.log_dir(args.dataset),
+                                        "distill_episodes.jsonl")
 
     records = load_manifest(args.manifest)
     os.makedirs(os.path.dirname(args.out), exist_ok=True)

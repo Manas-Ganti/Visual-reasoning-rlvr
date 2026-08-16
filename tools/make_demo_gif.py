@@ -25,6 +25,7 @@ from PIL import Image, ImageDraw, ImageFont
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from env import grid  # noqa: E402
+from training import common  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -236,7 +237,8 @@ def score(ep) -> tuple:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--log", default=os.path.join(REPO, "logs", "distill_episodes.jsonl"))
+    ap.add_argument("--dataset", default=common.DATASET)
+    ap.add_argument("--log", default=None)
     ap.add_argument("--out", default=os.path.join(REPO, "docs", "trajectory_demo.gif"))
     ap.add_argument("--episode-id", default=None)
     ap.add_argument("--truth", default="AI", choices=["AI", "REAL", "any"])
@@ -247,6 +249,8 @@ def main():
                     help="Also write per-turn PNGs next to the GIF.")
     ap.add_argument("--list", action="store_true")
     args = ap.parse_args()
+    args.log = args.log or os.path.join(common.log_dir(args.dataset),
+                                        "distill_episodes.jsonl")
 
     eps = [json.loads(l) for l in open(args.log) if l.strip()]
     if args.truth != "any":

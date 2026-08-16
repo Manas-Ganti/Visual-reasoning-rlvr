@@ -1,4 +1,4 @@
-"""Distill Stage-1 SFT traces from the base Qwen2-VL by teacher-forcing the label.
+"""Distill Stage-1 SFT traces from the base VLM by teacher-forcing the label.
 
 For each training image we tell the base model the correct answer up front and
 ask it to *conduct* a convincing, well-formatted investigation that lands on it —
@@ -10,11 +10,21 @@ the ground-truth label; everything else is discarded. The teacher hint is used
 ONLY here — the saved trace stores just the assistant turns, so SFT never sees the
 label leak.
 
+Trace quality is what Stage 1 inherits, so this is the one place worth spending a
+*bigger* teacher than the student: distilling with ``--model 72b`` into a 32B
+student is a legitimate (and cheap, one-off) upgrade.
+
 Output rows (consumed by ``training/sft.py``):
     {"index", "degradation", "actions": [assistant turn text, ...]}
 
-Requires transformers + a GPU (A100). Run before ``training/sft.py``:
-    python data/build_sft_traces.py --limit 800 --out data/sft_traces.jsonl
+Two ways to spend a multi-GPU node:
+
+    # vLLM, one tensor-parallel replica, 32 episodes advancing in lockstep
+    python data/build_sft_traces.py --backend vllm --tensor-parallel-size 8 \\
+        --model 72b --batch-episodes 32 --limit 1200
+
+    # HF, one replica per GPU, images strided across ranks
+    torchrun --nproc_per_node 8 data/build_sft_traces.py --model 32b --limit 1200
 """
 
 from __future__ import annotations
@@ -27,10 +37,10 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from env.environment import InvestigationEnv
-from env.trajectory import parse_turn
 from training import common
+from training import vllm_backend
 
-DEFAULT_OUT = os.path.join(common.REPO_ROOT, "data", "sft_traces.jsonl")
+# Paths are dataset-namespaced (see training/common.py: VRR_DATASET).
 
 TEACHER_HINT = (
     "INSTRUCTOR NOTE (not part of the record): the ground-truth label for this "
@@ -43,71 +53,113 @@ TEACHER_HINT = (
 )
 
 
-def distill_one(model, processor, env, index, degradation, max_turns, max_new_tokens=320) -> list[str] | None:
-    import torch
-
-    device = next(model.parameters()).device
-    obs, info = env.reset(options={"index": index, "degradation": degradation})
-    # Inject the teacher hint as an extra user message (never saved to the trace).
+def inject_teacher_hint(env) -> None:
+    """Append the label hint as an extra user message. Never saved to the trace —
+    we persist only the assistant turns."""
+    truth = env._ground_truth()
     env.state["messages"].append(
-        {"role": "user", "content": [{"type": "text", "text": TEACHER_HINT.format(truth=info["ground_truth"])}]}
+        {"role": "user", "content": [{"type": "text", "text": TEACHER_HINT.format(truth=truth)}]}
     )
 
-    actions: list[str] = []
-    with torch.no_grad():
-        for _ in range(max_turns):
-            obs = env._observation()  # includes the injected hint on turn 1
-            inputs = common.build_inputs(processor, obs, device)
-            out = model.generate(
-                **inputs, do_sample=True, temperature=0.6, top_p=0.9,
-                repetition_penalty=1.1, max_new_tokens=max_new_tokens,
-            )
-            new_tokens = out[0, inputs["input_ids"].shape[1]:]
-            action = processor.decode(new_tokens, skip_special_tokens=True).strip()
-            if parse_turn(action).action_type == "invalid":
-                return None  # reject malformed demonstrations outright
-            actions.append(action)
-            _, _, terminated, truncated, info = env.step(action)
-            if terminated or truncated:
-                break
 
-    # Keep only faithful, correct demonstrations.
-    if info.get("correct"):
-        return actions
-    return None
+def harvest(env, result: dict) -> None:
+    """Pull the assistant turns + a format verdict off the finished env.
+
+    Recovered from the conversation rather than tracked alongside it, so the
+    sequential and batched runners need no extra bookkeeping.
+    """
+    result["actions"] = [
+        m["content"][0]["text"] for m in env.state["messages"] if m["role"] == "assistant"
+    ]
+    result["well_formed"] = all(t["action_type"] != "invalid" for t in env.state["trace"])
+    result["degradation"] = env.state["degradation"]
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default=common.DEFAULT_MODEL)
-    ap.add_argument("--manifest", default=common.DEFAULT_MANIFEST)
-    ap.add_argument("--out", default=DEFAULT_OUT)
+    ap.add_argument("--model", default=common.DEFAULT_MODEL,
+                    help="Teacher: HF repo id or alias (7b | 32b | 72b | auto). May be larger "
+                         "than the student — distillation is a one-off cost.")
+    ap.add_argument("--dataset", default=common.DATASET,
+                    help="Dataset namespace for manifest and trace output.")
+    ap.add_argument("--manifest", default=None)
+    ap.add_argument("--out", default=None)
     ap.add_argument("--max-inspects", type=int, default=4)
     ap.add_argument("--degradation", default="clean")
     ap.add_argument("--limit", type=int, default=None, help="Cap #train images attempted.")
+    ap.add_argument("--temperature", type=float, default=0.6)
+    ap.add_argument("--max-new-tokens", type=int, default=320)
+    vllm_backend.add_backend_args(ap)
     args = ap.parse_args()
+    args.manifest = args.manifest or common.manifest_path(args.dataset)
+    args.out = args.out or common.traces_path(args.dataset)
+    os.makedirs(os.path.dirname(args.out), exist_ok=True)
 
-    env = InvestigationEnv(manifest_path=args.manifest, max_inspects=args.max_inspects, shuffle=False)
+    dist = common.init_distributed()
+    if dist.is_distributed and args.backend == "vllm":
+        raise SystemExit(
+            "Pick one: vLLM tensor parallelism OR torchrun rank sharding. Run the vLLM "
+            "backend as a single process (--tensor-parallel-size N), or drop --backend vllm."
+        )
+
+    def env_factory():
+        return InvestigationEnv(
+            manifest_path=args.manifest, max_inspects=args.max_inspects, shuffle=False
+        )
+
+    probe = env_factory()
     max_turns = args.max_inspects + 3
-    train_idx = [i for i, r in enumerate(env.records) if r.get("split", "train") == "train"]
+    train_idx = [i for i, r in enumerate(probe.records) if r.get("split", "train") == "train"]
     if args.limit:
         train_idx = train_idx[: args.limit]
+    jobs = [(i, args.degradation) for i in train_idx]
 
-    device = common.resolve_device("auto")
-    dtype = common.resolve_dtype(device, use_bf16=True)
-    model, processor = common.load_policy(args.model, adapter=None, device=device, dtype=dtype)
-    print(f"Distilling with {args.model} on {device} over {len(train_idx)} images.")
+    common.record_run("distill", f"model={args.model} out={args.out} "
+                      f"degradation={args.degradation}", args.dataset)
+    common.warn_if_tight(common.resolve_model(args.model), training=False)
+    policy = vllm_backend.build_policy(args)
+    common.rank0_print(
+        f"Distilling with {common.resolve_model(args.model)} over {len(jobs)} images "
+        f"(backend={args.backend}, world_size={dist.world_size})."
+    )
 
-    kept = 0
-    with open(args.out, "w") as f:
-        for n, idx in enumerate(train_idx):
-            actions = distill_one(model, processor, env, idx, args.degradation, max_turns)
-            if actions:
-                f.write(json.dumps({"index": idx, "degradation": args.degradation, "actions": actions}) + "\n")
-                kept += 1
+    local_jobs = common.shard(jobs)
+    if getattr(policy, "act_batch", None) is not None and args.batch_episodes > 1:
+        envs = common.make_env_pool(env_factory, args.batch_episodes)
+        results = common.run_episodes_batched(
+            policy, envs, local_jobs, max_turns, sample=True, temperature=args.temperature,
+            max_new_tokens=args.max_new_tokens, on_reset=inject_teacher_hint, on_episode=harvest,
+        )
+    else:
+        env = env_factory()
+        results = []
+        for n, (index, degradation) in enumerate(local_jobs):
+            ep = common.run_episode(
+                policy, env, index=index, degradation=degradation, max_turns=max_turns,
+                sample=True, temperature=args.temperature, max_new_tokens=args.max_new_tokens,
+                collect_tokens=False, on_reset=inject_teacher_hint,
+            )
+            harvest(env, ep)
+            results.append(ep)
             if (n + 1) % 25 == 0:
-                print(f"  {n + 1}/{len(train_idx)} attempted, {kept} kept", flush=True)
-    print(f"Wrote {kept} SFT traces to {args.out} (keep rate {kept / max(len(train_idx), 1):.1%}).")
+                common.rank0_print(f"  rank0: {n + 1}/{len(local_jobs)} attempted", flush=True)
+
+    # Keep only faithful, correct, well-formed demonstrations.
+    rows = [
+        {"index": r["index"], "degradation": r["degradation"], "actions": r["actions"]}
+        for r in results
+        if r["correct"] and r["well_formed"] and r["actions"]
+    ]
+    rows = common.gather_lists(rows)
+
+    if dist.is_main:
+        rows.sort(key=lambda r: r["index"])
+        with open(args.out, "w") as f:
+            for row in rows:
+                f.write(json.dumps(row) + "\n")
+        print(f"Wrote {len(rows)} SFT traces to {args.out} "
+              f"(keep rate {len(rows) / max(len(jobs), 1):.1%}).")
+    common.cleanup_distributed()
 
 
 if __name__ == "__main__":

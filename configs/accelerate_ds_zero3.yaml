@@ -1,0 +1,18 @@
+# Single node, 8 GPUs, DeepSpeed ZeRO-3 — for 72B SFT or any full finetune.
+# zero3_init_flag: true is what keeps `from_pretrained` from materializing the
+# whole model on every rank (partitioned as it loads instead).
+#   accelerate launch --config_file configs/accelerate_ds_zero3.yaml training/sft.py --model 72b
+compute_environment: LOCAL_MACHINE
+distributed_type: DEEPSPEED
+deepspeed_config:
+  deepspeed_config_file: configs/deepspeed_zero3.json
+  zero3_init_flag: true
+downcast_bf16: 'no'
+machine_rank: 0
+main_training_function: main
+mixed_precision: bf16
+num_machines: 1
+num_processes: 8
+rdzv_backend: static
+same_network: true
+use_cpu: false

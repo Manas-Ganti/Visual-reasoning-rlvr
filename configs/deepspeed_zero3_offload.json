@@ -1,0 +1,29 @@
+{
+  "_comment": [
+    "ZeRO-3 + CPU offload of parameters and optimizer state. The fallback when the",
+    "job is VRAM-bound rather than time-bound — e.g. 72B on fewer than 8 A100-80s,",
+    "or a full finetune. Expect a large slowdown; ARC nodes have plenty of host RAM,",
+    "so this trades wall-clock for feasibility. Needs pinned host memory: request",
+    "generous --mem in the SLURM script."
+  ],
+  "bf16": { "enabled": "auto" },
+  "zero_optimization": {
+    "stage": 3,
+    "offload_param": { "device": "cpu", "pin_memory": true },
+    "offload_optimizer": { "device": "cpu", "pin_memory": true },
+    "overlap_comm": true,
+    "contiguous_gradients": true,
+    "reduce_bucket_size": "auto",
+    "stage3_prefetch_bucket_size": "auto",
+    "stage3_param_persistence_threshold": "auto",
+    "stage3_max_live_parameters": 1e9,
+    "stage3_max_reuse_distance": 1e9,
+    "stage3_gather_16bit_weights_on_model_save": true
+  },
+  "gradient_accumulation_steps": "auto",
+  "gradient_clipping": "auto",
+  "train_batch_size": "auto",
+  "train_micro_batch_size_per_gpu": "auto",
+  "steps_per_print": 50,
+  "wall_clock_breakdown": false
+}

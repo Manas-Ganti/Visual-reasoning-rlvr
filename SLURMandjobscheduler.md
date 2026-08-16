@@ -137,6 +137,31 @@ from training import common, vllm_backend
 print('imports ok')"
 ```
 
+### 1.6b A checkpoint is only portable to the library version that wrote it
+
+The nastiest failure of the whole exercise, because **nothing errors**.
+
+`peft` stores LoRA weights keyed by module *path*
+(`base_model.model.model.language_model.layers.0.self_attn.q_proj`). Transformers
+4.56 restructured Qwen2.5-VL so the language tower sits under `language_model`;
+4.51 has no such node. Load a 4.56-written adapter under 4.51 and **zero keys
+match** — peft emits a `UserWarning`, falls back to the bare base model, and the
+job runs to completion producing numbers that look real.
+
+Two full eval runs measured an untrained model this way.
+
+```bash
+# what the adapter actually contains
+python -c "from safetensors.torch import load_file; \
+  print(list(load_file('<ckpt>/adapter_model.safetensors').keys())[:3])"
+
+# the assertion every eval should make
+grep -c "missing adapter keys" logs/slurm/<job>.err   # must be 0
+```
+
+Rules: evaluate in the environment that trained the checkpoint, and treat a
+non-zero missing-key count as a hard failure, not a warning.
+
 ### 1.7 Login-node import errors that are NOT real
 
 Two tracebacks look fatal on a login node and are harmless — they're driver
@@ -475,6 +500,20 @@ first run, so reruns start meaningfully faster.
 
 ---
 
+## 7b. Namespace your outputs by dataset
+
+When a project outlives one substrate, unnamespaced paths (`data/manifest.jsonl`,
+`checkpoints/sft-<model>`) mean run *n+1* silently overwrites run *n*, and a
+stage can read a stale artifact from a different experiment without noticing.
+
+This repo sets `VRR_DATASET` (see `training/common.py`) and derives every path
+from it — manifest, traces, checkpoints, episode logs, results. `arc_env.sh`
+exports it and prints it in the run banner, and each stage appends to
+`logs/<ds>/runs.tsv` so there is an index mapping job ids to what they were.
+
+Slurm's own `--output` cannot expand environment variables, so `logs/slurm/` stays
+flat — job ids already make those unique, and `runs.tsv` supplies the meaning.
+
 ## 8. Preflight checklist
 
 Run **all** of these before submitting anything long. Every one maps to a
@@ -504,6 +543,17 @@ failure above that cost a queue slot.
 [ ] echo "[env] node=$(hostname) nodes=$SLURM_NNODES gpus=$GPUS_PER_NODE hf_home=$HF_HOME"
 [ ] nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
 ```
+
+**Before building a pipeline on a new dataset — the cheapest check of all:**
+
+```bash
+[ ] ceiling probe at full resolution   # can the model do this task AT ALL?
+[ ] floor probe on the overview        # is it already solvable without inspecting?
+```
+
+A substrate needs a high ceiling and a floor at chance; the gap is the only space
+a policy can learn in. Fifteen minutes here would have redirected a week of work
+— see results/faces_negative_result.md.
 
 **First submission of any new stage:**
 

@@ -130,13 +130,21 @@ pytest tests/                              # verifiable-reward + trajectory + en
 python -m env.environment                  # scripted-policy smoke test (+ reward breakdown)
 
 # --- data (needs Kaggle creds) ---
-python data/build_manifest.py              # → data/manifest.jsonl (+ data/images/)
+export VRR_DATASET=genimage                # namespaces every artifact (see below)
+python data/build_manifest_genimage.py --src /path/to/GenImage --per-generator 200
+#   → data/genimage/manifest.jsonl (+ data/genimage/images/)
+
+# Before training anything on a new substrate, measure whether it CAN work:
+python tools/ceiling_probe.py --backend vllm --tensor-parallel-size 2 \
+    --domain image --condition full        # ceiling — want >=0.85
+python tools/ceiling_probe.py --backend vllm --tensor-parallel-size 2 \
+    --domain image --condition overview    # floor  — want ~chance
 
 # --- single GPU (7B tier, smoke runs) ---
 python data/build_sft_traces.py --model 7b --limit 200
 python training/sft.py  --model 7b
-python training/grpo.py --model 7b --sft-checkpoint checkpoints/sft-qwen2.5-vl-7b
-python eval/harness.py  --model 7b --adapter checkpoints/grpo-qwen2.5-vl-7b --compare-base
+python training/grpo.py --model 7b --sft-checkpoint checkpoints/$VRR_DATASET/sft-qwen2.5-vl-7b
+python eval/harness.py  --model 7b --adapter checkpoints/$VRR_DATASET/grpo-qwen2.5-vl-7b --compare-base
 
 # --- one 8-GPU node (32B tier) ---
 python data/build_sft_traces.py --backend vllm --tensor-parallel-size 8 \
@@ -144,17 +152,17 @@ python data/build_sft_traces.py --backend vllm --tensor-parallel-size 8 \
 accelerate launch --config_file configs/accelerate_ds_zero2.yaml \
     training/sft.py --model 32b                                   # Stage 1
 accelerate launch --config_file configs/accelerate_ds_zero2.yaml \
-    training/grpo.py --sft-checkpoint checkpoints/sft-qwen2.5-vl-32b   # Stage 2
+    training/grpo.py --sft-checkpoint checkpoints/$VRR_DATASET/sft-qwen2.5-vl-32b   # Stage 2
 python eval/harness.py --backend vllm --tensor-parallel-size 8 --batch-episodes 32 \
-    --adapter checkpoints/grpo-qwen2.5-vl-32b \
+    --adapter checkpoints/$VRR_DATASET/grpo-qwen2.5-vl-32b \
     --budgets 2,4 --degradations clean,jpeg,blur_downscale --compare-base
 
 # --- SLURM (VT ARC: TinkerCliffs A100 / Falcon H200) ---
 sbatch scripts/arc_sft.slurm                                # 32B, 1 node, ZeRO-2
 MODEL=72b DS=configs/deepspeed_zero3.json sbatch --nodes=2 scripts/arc_sft.slurm
-SFT_CKPT=checkpoints/sft-qwen2.5-vl-32b sbatch scripts/arc_grpo.slurm   # 32B, 2 nodes, ZeRO-2
-SFT_CKPT=checkpoints/sft-qwen2.5-vl-32b sbatch --nodes=1 scripts/arc_grpo.slurm  # ~2× wall clock
-JOB=eval ADAPTER=checkpoints/grpo-qwen2.5-vl-32b sbatch scripts/arc_infer.slurm
+SFT_CKPT=checkpoints/$VRR_DATASET/sft-qwen2.5-vl-32b sbatch scripts/arc_grpo.slurm   # 32B, 2 nodes, ZeRO-2
+SFT_CKPT=checkpoints/$VRR_DATASET/sft-qwen2.5-vl-32b sbatch --nodes=1 scripts/arc_grpo.slurm  # ~2× wall clock
+JOB=eval ADAPTER=checkpoints/$VRR_DATASET/grpo-qwen2.5-vl-32b sbatch scripts/arc_infer.slurm
 
 # --- demo ---
 python demo/app.py --log logs/grpo_episodes.jsonl
@@ -245,7 +253,8 @@ rows still work.
 
 ```
 env/         environment.py · reward.py · trajectory.py · grid.py · prompts.py · trace_logger.py
-data/        build_manifest.py · degradation.py · build_sft_traces.py · build_evidence_slice.py · curation.md
+data/        build_manifest.py · build_manifest_genimage.py · degradation.py · build_sft_traces.py · build_evidence_slice.py · curation.md
+tools/       ceiling_probe.py · traces_to_demo.py · make_demo_gif.py
 training/    common.py · vllm_backend.py · sft.py · grpo.py
 eval/        harness.py               (pass-rate × degradation × budget, calibration, evidence slice)
 configs/     accelerate_ds_zero{2,3}.yaml · accelerate_fsdp.yaml · deepspeed_zero{2,3,3_offload}.json
