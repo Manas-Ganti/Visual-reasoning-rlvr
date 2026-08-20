@@ -105,12 +105,34 @@ esac
 # re-run that only reprints the verification table works on a machine with
 # neither tool installed.
 _tool_checked=0
+GDOWN=""
+
+# `pip install --user` puts the gdown launcher in ~/.local/bin, which is not on
+# PATH on a default ARC login shell — so an installed gdown looks missing to
+# `command -v`. Fall back to the module form, which always works if the package
+# is importable by the active python.
+resolve_gdown() {
+  if command -v gdown >/dev/null 2>&1; then
+    GDOWN="gdown"
+  elif [ -x "$HOME/.local/bin/gdown" ]; then
+    GDOWN="$HOME/.local/bin/gdown"
+  elif python -m gdown --version >/dev/null 2>&1; then
+    GDOWN="python -m gdown"
+  elif python3 -m gdown --version >/dev/null 2>&1; then
+    GDOWN="python3 -m gdown"
+  else
+    die "gdown not found. Install it:  pip install --user --upgrade gdown
+       If it IS installed, ~/.local/bin is probably off your PATH:
+         export PATH=\"\$HOME/.local/bin:\$PATH\"
+       or activate the conda env you installed it into (conda activate vrr)."
+  fi
+  say "gdown       : $GDOWN"
+}
+
 require_tool() {
   [ "$_tool_checked" -eq 1 ] && return 0
   if [ "$METHOD" = "gdown" ]; then
-    command -v gdown >/dev/null 2>&1 || die \
-      "gdown not found. Install it: pip install --user --upgrade gdown
-       (old versions break on Drive's current confirm flow, so --upgrade matters)"
+    resolve_gdown
   else
     command -v rclone >/dev/null 2>&1 || die "rclone not found. Load a module or install it."
     rclone listremotes 2>/dev/null | grep -q "^${RCLONE_REMOTE}:" || die \
@@ -159,7 +181,7 @@ for entry in "${LINKS[@]}"; do
   # overnight run does not die at 3am on a single Drive quota error.
   if [ "$METHOD" = "gdown" ]; then
     # --remaining-ok lifts gdown's 50-files-per-folder cap.
-    gdown --folder --remaining-ok -O "$target" "$url" 2>&1 | tee "$log" || \
+    $GDOWN --folder --remaining-ok -O "$target" "$url" 2>&1 | tee "$log" || \
       say "WARNING: $name failed — see $log (try METHOD=rclone)"
   else
     rclone copy "${RCLONE_REMOTE}:${url}" "$target" -P --transfers "$TRANSFERS" 2>&1 | tee "$log" || \
