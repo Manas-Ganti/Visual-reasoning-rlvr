@@ -65,16 +65,38 @@ def _label_from_path(path: str):
     return None
 
 
+# Substring -> canonical generator name, longest first so "stable_diffusion_v_1_4"
+# is not shadowed by a shorter partial match.
+#
+# The official release names its Stable Diffusion dirs `imagenet_ai_0419_sdv4`
+# and `imagenet_ai_0424_sdv5` — note `sdv4`/`sdv5`, NOT `sdv1.4`. Mirrors also
+# ship `stable_diffusion_v_1_4`. All spellings normalise to `sdv1.4` / `sdv1.5`
+# so `--generators sdv1.4` selects the right thing regardless of the layout you
+# happened to download.
+_GENERATOR_ALIASES = (
+    ("stable_diffusion_v_1_4", "sdv1.4"),
+    ("stable_diffusion_v_1_5", "sdv1.5"),
+    ("sdv1.4", "sdv1.4"),
+    ("sdv1.5", "sdv1.5"),
+    ("sdv4", "sdv1.4"),
+    ("sdv5", "sdv1.5"),
+    ("midjourney", "midjourney"),
+    ("biggan", "biggan"),
+    ("glide", "glide"),
+    ("wukong", "wukong"),
+    ("vqdm", "vqdm"),
+    ("adm", "adm"),
+)
+
+
 def _generator_from_path(root: str, path: str) -> str:
     """First path component under the source root — GenImage's per-generator dir."""
     rel = os.path.relpath(path, root)
-    head = rel.split(os.sep)[0]
-    # Mirrors name these e.g. "imagenet_ai_0419_biggan" or "stable_diffusion_v_1_4".
-    for token in ("biggan", "adm", "glide", "midjourney", "vqdm", "wukong",
-                  "sdv1.4", "sdv1.5", "stable_diffusion_v_1_4", "stable_diffusion_v_1_5"):
-        if token in head.lower():
-            return token.replace("stable_diffusion_v_1_", "sdv1.")
-    return head.lower()
+    head = rel.split(os.sep)[0].lower()
+    for token, canonical in _GENERATOR_ALIASES:
+        if token in head:
+            return canonical
+    return head
 
 
 def scan(root: str, min_edge: int, verify: bool):
