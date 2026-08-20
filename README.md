@@ -232,7 +232,13 @@ python eval/harness.py --backend vllm --tensor-parallel-size 8 --batch-episodes 
     --budgets 2,4 --degradations clean,jpeg,blur_downscale --compare-base
 
 # --- SLURM (VT ARC: TinkerCliffs A100 / Falcon H200) ---
+# Gates first — small and short, so override the 8-GPU/8h job defaults.
+JOB=ceiling sbatch --gres=gpu:2 --time=00:30:00 scripts/arc_infer.slurm
+JOB=floor   sbatch --gres=gpu:2 --time=00:30:00 scripts/arc_infer.slurm
+JOB=distill sbatch scripts/arc_infer.slurm                  # only if the gate passed
 sbatch scripts/arc_sft.slurm                                # 32B, 1 node, ZeRO-2
+JOB=groupvar ADAPTER=checkpoints/$VRR_DATASET/sft-qwen2.5-vl-32b \
+    sbatch --gres=gpu:4 --time=02:00:00 scripts/arc_infer.slurm   # gate 2
 MODEL=72b DS=configs/deepspeed_zero3.json sbatch --nodes=2 scripts/arc_sft.slurm
 SFT_CKPT=checkpoints/$VRR_DATASET/sft-qwen2.5-vl-32b sbatch scripts/arc_grpo.slurm   # 32B, 2 nodes, ZeRO-2
 SFT_CKPT=checkpoints/$VRR_DATASET/sft-qwen2.5-vl-32b sbatch --nodes=1 scripts/arc_grpo.slurm  # ~2× wall clock

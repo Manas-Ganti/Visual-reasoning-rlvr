@@ -1,10 +1,24 @@
 #!/usr/bin/env bash
-# Offline inference on ARC: trace distillation (Stage 0→1) and the eval harness.
-# One node; vLLM holds a single tensor-parallel replica across its GPUs.
+# Offline inference on ARC: the two pre-training gates, trace distillation
+# (Stage -1) and the eval harness. One node; vLLM holds a single tensor-parallel
+# replica across its GPUs.
 #
+#   # --- gates: run these BEFORE spending a node on training -----------------
+#   # Short and small — override the 8-GPU/8h defaults so they queue fast.
+#   JOB=ceiling sbatch --gres=gpu:2 --time=00:30:00 scripts/arc_infer.slurm
+#   JOB=floor   sbatch --gres=gpu:2 --time=00:30:00 scripts/arc_infer.slurm
+#   JOB=groupvar ADAPTER=checkpoints/genimage/sft-qwen2.5-vl-32b \
+#     sbatch --gres=gpu:4 --time=02:00:00 scripts/arc_infer.slurm
+#
+#   # --- the expensive stages ------------------------------------------------
 #   JOB=distill MODEL=72b sbatch scripts/arc_infer.slurm       # bigger teacher
-#   JOB=eval ADAPTER=checkpoints/grpo-qwen2.5-vl-32b sbatch scripts/arc_infer.slurm
+#   JOB=eval ADAPTER=checkpoints/genimage/grpo-qwen2.5-vl-32b sbatch scripts/arc_infer.slurm
 #   JOB=evidence sbatch scripts/arc_infer.slurm                # HF, rank-sharded
+#
+# Gate 1 (ceiling/floor) asks whether the SUBSTRATE is learnable: ceiling >=0.85
+# at full resolution, floor ~chance through the env's overview. Gate 2 (groupvar)
+# asks whether the POLICY sits where GRPO has a gradient — run it on the SFT
+# checkpoint, want usable_groups >=0.40. Details in README "Before you train".
 #
 # vLLM tensor parallelism and torchrun rank-sharding are alternatives, never
 # combined: the first puts one big model across the GPUs, the second puts one
@@ -34,6 +48,24 @@ BATCH_EPISODES="${BATCH_EPISODES:-32}"
 LIMIT="${LIMIT:-}"
 
 case "$JOB" in
+  ceiling|floor)
+    # Same probe, two conditions. The gap between them is the only room the
+    # investigation has to work in, so both numbers are needed to read either.
+    if [ "$JOB" = "ceiling" ]; then CONDITION=full; else CONDITION=overview; fi
+    python tools/ceiling_probe.py \
+      --model "$MODEL" --backend vllm --tensor-parallel-size "$TP" \
+      --condition "$CONDITION" --limit "${LIMIT:-200}" \
+      ${ADAPTER:+--adapter "$ADAPTER"} "$@"
+    ;;
+  groupvar)
+    python tools/group_variance_probe.py \
+      --model "$MODEL" --backend vllm --tensor-parallel-size "$TP" \
+      --batch-episodes "$BATCH_EPISODES" \
+      ${ADAPTER:+--adapter "$ADAPTER"} \
+      --images "${IMAGES:-32}" -G "${G:-8}" \
+      --degradation "${DEGRADATION:-clean}" \
+      --max-inspects "${MAX_INSPECTS:-4}" "$@"
+    ;;
   distill)
     python data/build_sft_traces.py \
       --model "$MODEL" --backend vllm --tensor-parallel-size "$TP" \
@@ -54,7 +86,7 @@ case "$JOB" in
       --model "$MODEL" --propose --limit "${LIMIT:-120}" --topk "${TOPK:-3}" "$@"
     ;;
   *)
-    echo "JOB must be one of: distill | eval | evidence" >&2
+    echo "JOB must be one of: ceiling | floor | groupvar | distill | eval | evidence" >&2
     exit 2
     ;;
 esac
