@@ -143,7 +143,8 @@ def main():
     common.record_run("sft", f"model={model_name} traces={args.traces} out={output_dir}",
                       args.dataset)
 
-    env = InvestigationEnv(manifest_path=args.manifest, max_inspects=args.max_inspects, shuffle=False)
+    env = InvestigationEnv(manifest_path=args.manifest, max_inspects=args.max_inspects,
+                           shuffle=False, dataset=args.dataset)
     traces = load_traces(args.traces)
     conversations = [c for t in traces if (c := replay_to_conversation(env, t))]
     common.rank0_print(f"Loaded {len(traces)} traces; {len(conversations)} replayed cleanly.")

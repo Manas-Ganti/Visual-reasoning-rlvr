@@ -6,8 +6,8 @@ visual reasoning.**
 An agentic RL environment where a VLM investigates an image under a
 resolution/action budget — forming testable hypotheses, inspecting regions to
 confirm or refute them, and committing a verdict — trained so that *reasoning is
-the only efficient path to reward*. The task: decide whether a face is a real
-photograph or AI-generated (StyleGAN2). The point: a reward that is **mechanically
+the only efficient path to reward*. The task: decide whether an image is a real
+photograph or AI-generated. The point: a reward that is **mechanically
 verifiable end to end — no LLM judge anywhere.**
 
 > The interesting artifact here is the **reward**, not the detector. See
@@ -77,22 +77,37 @@ episode. The reward reads only numeric beliefs and reconciliation *direction* �
 never prose — so boilerplate reasoning earns nothing. Full rationale + the
 reward-hacking surface: [`results/reward_failure_history.md`](results/reward_failure_history.md).
 
-## Difficulty (two honest axes)
+## Difficulty (two honest axes, plus one breakdown)
 
-Single-generator data (StyleGAN2) gives no generator tiers, so difficulty is
-manufactured two ways: **image degradation** (`clean → jpeg → blur_downscale`) and
-**budget tightness** (fewer allowed inspects). The eval harness reports pass rate
-across both — the calibration deliverable: *"to target model X at ~50% pass, use
-degradation Y at budget k."*
+`generator` is categorical, not ordered, so it gives a breakdown rather than a
+difficulty ladder. Difficulty is manufactured two ways instead: **image
+degradation** (`clean → jpeg → blur_downscale`) and **budget tightness** (fewer
+allowed inspects). The eval harness reports pass rate across both — the
+calibration deliverable: *"to target model X at ~50% pass, use degradation Y at
+budget k."* It also breaks pass rate down **per generator** (ADM, BigGAN, GLIDE,
+Midjourney, SD 1.4/1.5, VQDM, Wukong), which separates "detects BigGAN, blind to
+Midjourney" from "uniformly weak".
+
+These axes are not only reporting dimensions. They are the knobs that put the
+policy in the band where GRPO has a gradient at all — see **Before you train**
+below.
 
 ## Pipeline
 
 | Stage | What | Script |
 |---|---|---|
+| −1 | **Substrate gate** — ceiling ≥0.85, floor ≈chance | `tools/ceiling_probe.py` |
 | 0 | Baseline eval (zero-shot pass rate per degradation) | `eval/harness.py` |
 | 1 | **SFT** — teach the pre/post format from distilled traces | `training/sft.py` |
+| 1.5 | **GRPO gate** — do groups of rollouts actually disagree? | `tools/group_variance_probe.py` |
 | 2 | **GRPO** — online RL vs the verifiable reward, KL-anchored to SFT | `training/grpo.py` |
 | 3 | **Verification** — prove the gains are real (below) | `eval/harness.py` |
+
+The two gates are cheap and they are not optional. Skipping stage −1 cost this
+project a full pipeline build on an unlearnable substrate
+([`results/faces_negative_result.md`](results/faces_negative_result.md)); stage
+1.5 is the same discipline applied to the question stage −1 does not answer.
+See **Before you train** below.
 
 Base model **Qwen2.5-VL-32B-Instruct** (`--model 7b | 32b | 72b | auto`).
 Inference via **vLLM** with tensor parallelism (eval + trace distillation);
@@ -120,6 +135,61 @@ metric but still counted in accuracy.
 
 ---
 
+## Before you train
+
+Two measurements, ~15 minutes each, that decide whether the expensive stages can
+work at all. Both exist because the project once skipped the first one.
+
+### Gate 1 — is the substrate learnable? (`tools/ceiling_probe.py`)
+
+Strip the environment away entirely: native resolution, one question, one word,
+no budget, no format. Then do it again through the env's blurred overview.
+
+| | want | reads as |
+|---|---|---|
+| **ceiling** (`--condition full`) | ≥0.85 | the model *can* know the answer |
+| **floor** (`--condition overview`) | ≈chance | the overview genuinely withholds it |
+
+The **gap between them is the only room investigation has to work in.** A low
+ceiling means no amount of RL will help. A high floor means the model is reading a
+global low-level statistic that survives downsampling — on GenImage that is the
+compression confound (see [`data/curation.md`](data/curation.md)), and it makes
+the investigation decorative. Read the confusion matrix, not just the accuracy:
+the face substrate scored 0.390 *and* predicted "AI" on 4 of 100 images, and only
+the second number was actionable.
+
+### Gate 2 — will GRPO have a gradient? (`tools/group_variance_probe.py`)
+
+Run this on the **SFT checkpoint**, not the base model — it is where GRPO starts.
+
+GRPO has no critic. It scores a group of `G` rollouts on the same image and uses
+each rollout's advantage relative to that group's mean. If every rollout in a
+group reaches the same verdict, `verdict_correct` (±1.0, the dominant term) is
+constant inside the group and contributes nothing.
+
+That is worse than a no-op. The process terms (0.70 of the weight, combined) still
+vary, so the gradient does not vanish — it **redirects**, and the run spends its
+budget teaching the policy to write internally-coherent investigations decoupled
+from whether they reach the right answer. That is precisely the pathology
+[`results/reward_failure_history.md`](results/reward_failure_history.md) exists to
+prevent, arriving through the data instead of through the reward.
+
+The probe reports `usable_groups` — the fraction of groups containing both a right
+and a wrong rollout:
+
+| `usable_groups` | verdict |
+|---|---|
+| ≥0.40 | healthy — launch GRPO |
+| 0.15–0.40 | thin — expect slow, noisy progress; tune difficulty first |
+| <0.15 | do not launch — check `all_wrong` vs `all_correct` for which way to move |
+
+`all_wrong` says the task is too hard for this policy (ease the degradation, raise
+the budget); `all_correct` says it is too easy (tighten them). This is what the
+difficulty axes are *for* — landing the pass rate near 0.5, where the outcome term
+carries the signal.
+
+---
+
 ## Quickstart
 
 ```bash
@@ -136,9 +206,13 @@ python data/build_manifest_genimage.py --src /path/to/GenImage --per-generator 2
 
 # Before training anything on a new substrate, measure whether it CAN work:
 python tools/ceiling_probe.py --backend vllm --tensor-parallel-size 2 \
-    --domain image --condition full        # ceiling — want >=0.85
+    --condition full                       # ceiling — want >=0.85
 python tools/ceiling_probe.py --backend vllm --tensor-parallel-size 2 \
-    --domain image --condition overview    # floor  — want ~chance
+    --condition overview                   # floor  — want ~chance
+
+# After SFT, before GRPO: does the policy produce groups that disagree?
+python tools/group_variance_probe.py --backend vllm --tensor-parallel-size 2 \
+    --adapter checkpoints/$VRR_DATASET/sft-qwen2.5-vl-32b --images 32 -G 8
 
 # --- single GPU (7B tier, smoke runs) ---
 python data/build_sft_traces.py --model 7b --limit 200
@@ -252,19 +326,23 @@ rows still work.
 ## Repository
 
 ```
-env/         environment.py · reward.py · trajectory.py · grid.py · prompts.py · trace_logger.py
+env/         environment.py · reward.py · trajectory.py · grid.py · prompts.py (domain registry) · trace_logger.py
 data/        build_manifest.py · build_manifest_genimage.py · degradation.py · build_sft_traces.py · build_evidence_slice.py · curation.md
-tools/       ceiling_probe.py · traces_to_demo.py · make_demo_gif.py
+tools/       ceiling_probe.py · group_variance_probe.py · traces_to_demo.py · make_demo_gif.py
 training/    common.py · vllm_backend.py · sft.py · grpo.py
 eval/        harness.py               (pass-rate × degradation × budget, calibration, evidence slice)
 configs/     accelerate_ds_zero{2,3}.yaml · accelerate_fsdp.yaml · deepspeed_zero{2,3,3_offload}.json
 scripts/     arc_env.sh · arc_sft.slurm · arc_grpo.slurm · arc_infer.slurm   (VT ARC SLURM)
-tests/       test_reward.py · test_trajectory.py · test_environment.py   (CI target)
+tests/       test_reward.py · test_trajectory.py · test_environment.py · test_prompts.py · test_reporting.py   (CI target)
 demo/        app.py                   (Gradio step-by-step trajectory viewer)
 results/     reward_failure_history.md · curves/tables
 Dockerfile · .github/workflows/ci.yml
 ```
 
-Substrate: [Fake-Vs-Real-Faces (Hard)](https://www.kaggle.com/datasets/hamzaboulahia/hardfakevsrealfaces)
-— 1,288 300×300 images (700 StyleGAN2 fakes, 589 real), image-level labels only.
-See [`data/curation.md`](data/curation.md).
+Substrate: [GenImage](https://github.com/GenImage-Dataset/GenImage) — real
+ImageNet photographs vs. eight generators (ADM, BigGAN, GLIDE, Midjourney, SD
+1.4/1.5, VQDM, Wukong), image-level labels only. The 300×300 StyleGAN2 face set is
+**retired**: the base VLM could not separate its classes at all, measured in
+[`results/faces_negative_result.md`](results/faces_negative_result.md). See
+[`data/curation.md`](data/curation.md) for both, and for the GenImage compression
+confound and how the floor probe detects it.

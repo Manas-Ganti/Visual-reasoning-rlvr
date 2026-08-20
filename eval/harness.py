@@ -158,6 +158,72 @@ def evidence_slice_hit_rate(results: list[dict], slice_rows: list[dict]) -> dict
     return {"n": n, "inspect_hit_rate": hits / n if n else 0.0}
 
 
+def per_generator(results: list[dict], records: list[dict]) -> list[dict]:
+    """Break accuracy down by the generator that produced each fake.
+
+    GenImage carries ``generator`` per row (ADM, BigGAN, GLIDE, Midjourney,
+    SD 1.4/1.5, VQDM, Wukong), so "detects BigGAN, blind to Midjourney" and
+    "uniformly weak" are distinguishable — they are not, from the aggregate.
+    Real images are grouped under their source generator directory too, which is
+    what makes the per-row ``recall`` (AI class) the column to read.
+
+    Returns [] on a substrate whose manifest has no ``generator`` field.
+    """
+    groups: dict[str, list[dict]] = {}
+    for r in results:
+        gen = records[r["index"]].get("generator")
+        if gen is None:
+            continue
+        groups.setdefault(gen, []).append(r)
+    return [{"generator": g, **compute_metrics(rs)} for g, rs in sorted(groups.items())]
+
+
+def class_breakdown(results: list[dict]) -> dict:
+    """Per-truth-class prediction counts — the collapse detector.
+
+    A model that answers REAL for everything scores a respectable accuracy on an
+    unbalanced split while carrying zero signal. That failure was invisible in
+    the aggregate numbers on the face substrate and had to be recovered from the
+    trace log afterwards (results/faces_negative_result.md); it is printed here
+    so it can never hide again.
+    """
+    out = {}
+    for truth in ("AI", "REAL"):
+        rows = [r for r in results if r["ground_truth"] == truth]
+        out[truth] = {
+            "n": len(rows),
+            "AI": sum(r["predicted"] == "AI" for r in rows),
+            "REAL": sum(r["predicted"] == "REAL" for r in rows),
+            "no_answer": sum(not r["answered"] for r in rows),
+        }
+    answered = sum(r["answered"] for r in results)
+    out["predicted_AI_rate"] = (
+        sum(r["predicted"] == "AI" for r in results) / answered if answered else 0.0
+    )
+    return out
+
+
+def _print_class_breakdown(title, results):
+    cb = class_breakdown(results)
+    print(f"\n=== {title}: class breakdown (collapse check) ===")
+    for truth in ("AI", "REAL"):
+        row = cb[truth]
+        print(f"  truth {truth:<4} n={row['n']:>4}  ->  "
+              f"AI={row['AI']:>4}  REAL={row['REAL']:>4}  no_answer={row['no_answer']:>4}")
+    print(f"  predicted AI on {cb['predicted_AI_rate']:.1%} of answered episodes "
+          f"(near 0% or 100% = class collapse, accuracy is meaningless)")
+
+
+def _print_per_generator(title, rows):
+    if not rows:
+        return
+    print(f"\n=== {title}: pass rate × generator ===")
+    print(f"  {'generator':<24}{'n':>5}{'acc':>9}{'recall(AI)':>13}{'answer':>9}")
+    for r in rows:
+        print(f"  {r['generator']:<24}{r['n']:>5}{r['accuracy']:>9.3f}"
+              f"{r['recall']:>13.3f}{r['answer_rate']:>9.3f}")
+
+
 # --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
@@ -210,7 +276,8 @@ def main():
         )
 
     # Test indices are shared across all configs (same env, re-created per budget).
-    probe = InvestigationEnv(manifest_path=args.manifest, max_inspects=max(budgets), shuffle=False)
+    probe = InvestigationEnv(manifest_path=args.manifest, max_inspects=max(budgets),
+                             shuffle=False, dataset=args.dataset)
     test_idx = [i for i, r in enumerate(probe.records) if r.get("split") == "test"]
     if args.limit:
         test_idx = test_idx[: args.limit]
@@ -235,7 +302,7 @@ def main():
     def env_factory(budget):
         return lambda: InvestigationEnv(
             manifest_path=args.manifest, max_inspects=budget,
-            reward_config=RewardConfig(), shuffle=False,
+            reward_config=RewardConfig(), shuffle=False, dataset=args.dataset,
         )
 
     policy_grid, base_grid = {}, {}
@@ -283,6 +350,10 @@ def main():
         return
 
     _print_grid("Policy", policy_grid)
+    # Reported on the reference config (first degradation × first budget) — the
+    # same rollouts the calibration curve reads, so this costs no extra passes.
+    _print_class_breakdown("Policy", reference)
+    _print_per_generator("Policy", per_generator(reference, probe.records))
     if base_grid:
         _print_grid("Base", base_grid)
         test = mcnemar(paired_base, paired_policy)
@@ -292,6 +363,8 @@ def main():
         print(f"  base-only-correct={test['b']} policy-only-correct={test['c']} p={p}")
         print(f"  accuracy delta: "
               f"{policy_grid[(d0, b0)]['accuracy'] - base_grid[(d0, b0)]['accuracy']:+.3f}")
+        _print_class_breakdown("Base", paired_base)
+        _print_per_generator("Base", per_generator(paired_base, probe.records))
 
     print(f"\n=== Calibration curve ({degradations[0]}, budget {budgets[0]}) ===")
     for row in calibration_curve(reference):

@@ -1,6 +1,6 @@
 """The investigation environment.
 
-One episode presents one face image. The agent sees only a low-resolution
+One episode presents one image. The agent sees only a low-resolution
 OVERVIEW at reset (partial observability — fine artifacts are blurred away) and
 must spend a limited ``inspect`` budget to reveal 4×4 grid cells at high
 resolution before committing a ``verdict``. Because the answer is unreachable
@@ -71,9 +71,17 @@ class InvestigationEnv(gym.Env):
         shuffle: bool = True,
         seed: int | None = None,
         default_degradation: str = "clean",
+        domain: str | None = None,
+        dataset: str | None = None,
     ):
         super().__init__()
         self.manifest_path = manifest_path
+        # Substrate-specific half of the system prompt (subject + artifact
+        # checklist). Resolved once here rather than read from a module-level
+        # constant, so a dataset switch cannot leave the agent hunting for face
+        # artifacts on ImageNet photographs. See env/prompts.py.
+        self.domain = domain or prompts.resolve_domain(dataset)
+        self.system_prompt = prompts.system_prompt(self.domain)
         self.max_inspects = max_inspects
         # A few turns of slack beyond the budget for the terminal verdict turn and
         # a little tolerance for malformed retries, so the episode can't hang.
@@ -154,7 +162,7 @@ class InvestigationEnv(gym.Env):
         )
 
         messages = [
-            {"role": "system", "content": [{"type": "text", "text": prompts.SYSTEM_PROMPT_FULL}]},
+            {"role": "system", "content": [{"type": "text", "text": self.system_prompt}]},
             {
                 "role": "user",
                 "content": [
@@ -379,27 +387,35 @@ def _synthetic_manifest() -> str:
 
 
 def _smoke_test():
+    # Dataset-namespaced, like every other artifact (training/common.py). Read
+    # from the environment rather than imported, since training/ imports env/.
+    dataset = (os.environ.get("VRR_DATASET") or "genimage").strip()
     here = os.path.dirname(os.path.abspath(__file__))
-    manifest = os.path.join(here, "..", "data", "manifest.jsonl")
+    manifest = os.path.join(here, "..", "data", dataset, "manifest.jsonl")
     if not os.path.exists(manifest):
-        print("No data/manifest.jsonl yet; using a synthetic manifest for the smoke test.")
+        print(f"No data/{dataset}/manifest.jsonl yet; using a synthetic manifest "
+              f"for the smoke test.")
         manifest = _synthetic_manifest()
 
-    env = InvestigationEnv(manifest_path=manifest, max_inspects=4, seed=0, shuffle=False)
+    env = InvestigationEnv(manifest_path=manifest, max_inspects=4, seed=0, shuffle=False,
+                           dataset=dataset)
     obs, info = env.reset(options={"index": 0, "degradation": "clean"})
     print(f"Reset: id={info['id']} truth={info['ground_truth']} "
           f"images={len(obs['images'])} budget={obs['inspects_remaining']}")
 
     scripted = [
-        "OBSERVATION: Blurry centered face.\nREASONING: Eyes leak GAN artifacts first.\n"
-        "HYPOTHESIS: If AI, the left iris in cell 6 will be malformed.\nACTION: INSPECT 6",
-        "RECONCILIATION: CONFIRMED - the iris edge is warped as predicted.\n"
+        "OBSERVATION: Blurry scene, a sign near the centre.\n"
+        "REASONING: Generated lettering degrades before anything else does.\n"
+        "HYPOTHESIS: If AI, the text on the sign in cell 6 will be unreadable.\n"
+        "ACTION: INSPECT 6",
+        "RECONCILIATION: CONFIRMED - the lettering is garbled as predicted.\n"
         "BELIEF_UPDATE: P(fake)=0.75 because the artifact is clear.\n"
-        "OBSERVATION: Warped iris.\nREASONING: Corroborate with the ear.\n"
-        "HYPOTHESIS: If AI, the earring in cell 8 is asymmetric.\nACTION: INSPECT 8",
-        "RECONCILIATION: CONFIRMED - earring halves mismatch.\n"
+        "OBSERVATION: Garbled text.\nREASONING: Corroborate with an independent cue.\n"
+        "HYPOTHESIS: If AI, the shadow in cell 8 will fall the wrong way.\n"
+        "ACTION: INSPECT 8",
+        "RECONCILIATION: CONFIRMED - the shadow disagrees with the light source.\n"
         "BELIEF_UPDATE: P(fake)=0.88 because two independent artifacts agree.\n"
-        "OBSERVATION: Mismatched earring.\nREASONING: Enough evidence to commit.\n"
+        "OBSERVATION: Inconsistent shadow.\nREASONING: Enough evidence to commit.\n"
         "HYPOTHESIS: none.\nACTION: VERDICT AI confidence=0.85",
     ]
 

@@ -53,24 +53,36 @@ id, node, and key arguments — which is what makes a directory full of
 ## Pipeline at a glance
 
 ```
-Stage -1   build_manifest.py     data/manifest.jsonl + data/images/    1,290 images
+Stage -2   build_manifest_*.py   data/<ds>/manifest.jsonl + images/    1,290 images
               │                                                        1033 / 128 / 128
-Stage  0   build_sft_traces.py   data/sft_traces.jsonl                 263 traces (25.5%)
-              │                  rejection-sampled demonstrations
-Stage  1   training/sft.py       checkpoints/sft-qwen2.5-vl-32b        566 MB LoRA
+   ── GATE ── tools/ceiling_probe.py   ceiling >=0.85 (--condition full)
+              │                        floor  ~chance (--condition overview)
+              │                        is this substrate learnable AT ALL?
+Stage -1   build_sft_traces.py   data/<ds>/sft_traces.jsonl            263 traces (25.5%)
+              │                  rejection-sampled, label-revealed teacher
+Stage  1   training/sft.py       checkpoints/<ds>/sft-qwen2.5-vl-32b   566 MB LoRA
               │                  format compliance, learned unaided
-   ── GATE ── eval/harness.py    answer rate · pass rate · calibration
-              │                  can GRPO get a gradient from this?
-Stage  2   training/grpo.py      checkpoints/grpo-qwen2.5-vl-32b       the actual RL
+   ── GATE ── tools/group_variance_probe.py   usable_groups >= 0.40
+              │                        eval/harness.py: answer rate, class breakdown
+              │                        can GRPO get a gradient from this?
+Stage  2   training/grpo.py      checkpoints/<ds>/grpo-qwen2.5-vl-32b  the actual RL
               │                  strategy, scored on outcomes
-Stage  3   eval/harness.py       degradation × budget grid, McNemar,
-                                 calibration, evidence slice
+Stage  3   eval/harness.py       degradation × budget × generator grid, McNemar,
+                                 calibration, class breakdown, evidence slice
 ```
 
 Each stage consumes exactly one artifact from the stage above, and **nothing
 downstream re-validates it**. A thin trace file or a half-loaded adapter
 propagates silently. That is the single most important structural fact about
-this pipeline, and the reason the gate exists.
+this pipeline, and the reason the gates exist.
+
+The two gates answer different questions and neither substitutes for the other.
+The ceiling probe asks whether the **substrate** carries signal the model can
+perceive; the group-variance probe asks whether the **policy** sits in the band
+where GRPO's group-relative advantage is non-degenerate. The faces run failed the
+first and would also have failed the second — every group unanimously wrong, so
+the outcome term contributes nothing and the process terms (0.70 of the weight)
+become the entire training signal.
 
 ---
 

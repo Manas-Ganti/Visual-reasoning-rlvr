@@ -25,15 +25,8 @@ from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from env import grid  # noqa: E402
+from env import grid, prompts  # noqa: E402
 from training import common, vllm_backend  # noqa: E402
-
-QUESTIONS = {
-    "face": ("Is this face a real photograph or AI-generated (StyleGAN2)? "
-             "Answer with exactly one word: REAL or AI."),
-    "image": ("Is this image a real photograph or AI-generated? "
-              "Answer with exactly one word: REAL or AI."),
-}
 
 
 def parse_answer(text: str):
@@ -50,13 +43,19 @@ def main():
     ap = argparse.ArgumentParser()
     vllm_backend.add_backend_args(ap)
     ap.add_argument("--model", default=common.DEFAULT_MODEL)
+    ap.add_argument("--dataset", default=common.DATASET,
+                    help="Dataset namespace: selects the manifest and, unless --domain is\n"
+                         "given, the domain-specific question.")
     ap.add_argument("--adapter", default=None, help="Optional LoRA to probe instead of base.")
-    ap.add_argument("--manifest", default=common.DEFAULT_MANIFEST)
+    ap.add_argument("--manifest", default=None)
     ap.add_argument("--split", default="test")
     ap.add_argument("--limit", type=int, default=100)
     ap.add_argument("--batch", type=int, default=32)
-    ap.add_argument("--domain", choices=sorted(QUESTIONS), default="face",
-                    help="Which prompt to ask; add entries to QUESTIONS for new substrates.")
+    ap.add_argument("--domain", choices=sorted(prompts.DOMAINS), default=None,
+                    help="Which domain's question to ask. Default: whatever the dataset "
+                         "maps to in env/prompts.DATASET_DOMAIN — so this is right by "
+                         "default and only needs setting to probe a substrate as if it "
+                         "were another.")
     ap.add_argument("--question", default=None, help="Override the prompt entirely.")
     ap.add_argument("--condition", choices=["full", "overview"], default="full",
                     help="full: native resolution (the CEILING — what the model could know). "
@@ -66,14 +65,18 @@ def main():
     ap.add_argument("--overview-long-edge", type=int, default=140,
                     help="Must match env/grid.make_overview to measure the real floor.")
     args = ap.parse_args()
+    args.manifest = args.manifest or common.manifest_path(args.dataset)
 
-    question = args.question or QUESTIONS[args.domain]
+    domain = args.domain or prompts.resolve_domain(args.dataset)
+    question = args.question or prompts.classify_prompt(domain)
 
     rows = [json.loads(l) for l in open(args.manifest) if l.strip()]
     items = [r for r in rows if r.get("split") == args.split][: args.limit]
     truths = collections.Counter("AI" if int(r["label"]) == 1 else "REAL" for r in items)
-    print(f"[{args.condition}] {len(items)} {args.split} images — {dict(truths)}; "
+    print(f"[{args.condition}] dataset={args.dataset} domain={domain} — {len(items)} "
+          f"{args.split} images {dict(truths)}; "
           f"majority baseline {max(truths.values()) / len(items):.3f}")
+    print(f"  question: {question}")
 
     policy = vllm_backend.build_policy(args, adapter=args.adapter)
 

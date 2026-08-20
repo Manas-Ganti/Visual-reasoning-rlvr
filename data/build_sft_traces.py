@@ -104,7 +104,8 @@ def main():
 
     def env_factory():
         return InvestigationEnv(
-            manifest_path=args.manifest, max_inspects=args.max_inspects, shuffle=False
+            manifest_path=args.manifest, max_inspects=args.max_inspects, shuffle=False,
+            dataset=args.dataset,
         )
 
     probe = env_factory()

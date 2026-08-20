@@ -218,7 +218,7 @@ def main():
     env = InvestigationEnv(
         manifest_path=args.manifest, max_inspects=args.max_inspects,
         reward_config=RewardConfig(), shuffle=False, default_degradation=args.degradation,
-        seed=args.seed + dist.rank,
+        seed=args.seed + dist.rank, dataset=args.dataset,
     )
     max_turns = args.max_inspects + 3
     train_idx = [i for i, r in enumerate(env.records) if r.get("split", "train") == "train"]

@@ -13,7 +13,7 @@ Two-phase, because the honest version keeps a human in the loop:
    ``artifact_cells`` to the cells where a real, nameable artifact is actually
    visible at zoom (and sets it to ``[]`` for genuinely indistinguishable fakes,
    which are then excluded from the inspect-hit metric but still counted in
-   verdict accuracy). This step produces ``evidence_slice.jsonl``.
+   verdict accuracy). This step produces ``data/<dataset>/evidence_slice.jsonl``.
 
 The slice is used ONLY by ``eval/harness.py`` — never in any reward. See
 ``data/curation.md`` for the scoping rationale.
@@ -23,7 +23,7 @@ it is both batched and rank-shardable — HF backend only, since it reads next-t
 logits rather than generating.
 
     torchrun --nproc_per_node 8 data/build_evidence_slice.py --propose --limit 120 --topk 3
-    #  ... hand-edit data/evidence_slice_review.jsonl ...
+    #  ... hand-edit data/<dataset>/evidence_slice_review.jsonl ...
     python data/build_evidence_slice.py --finalize
 """
 
@@ -38,20 +38,19 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PIL import Image, ImageDraw
 
-from env import grid
+from env import grid, prompts
 from env.environment import InvestigationEnv
 from training import common
 
-REVIEW_PATH = os.path.join(common.REPO_ROOT, "data", "evidence_slice_review.jsonl")
-FINAL_PATH = os.path.join(common.REPO_ROOT, "data", "evidence_slice.jsonl")
-
-CLASSIFY_PROMPT = (
-    "Is this face a real photograph or AI-generated? Answer with a single word: "
-    "AI or REAL."
-)
+def review_path(dataset: str | None = None) -> str:
+    return os.path.join(common.dataset_dir(dataset), "evidence_slice_review.jsonl")
 
 
-def _p_ai(model, processor, images, batch_size: int = 8) -> list[float]:
+def final_path(dataset: str | None = None) -> str:
+    return os.path.join(common.dataset_dir(dataset), "evidence_slice.jsonl")
+
+
+def _p_ai(model, processor, images, prompt: str, batch_size: int = 8) -> list[float]:
     """P(next token == 'AI') per image, under a single-shot classification prompt.
 
     Batched: one image plus its 16 occlusions is 17 forward passes per row, and at
@@ -61,7 +60,7 @@ def _p_ai(model, processor, images, batch_size: int = 8) -> list[float]:
     import torch
 
     device = next(model.parameters()).device
-    messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": CLASSIFY_PROMPT}]}]
+    messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": prompt}]}]
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     tok = processor.tokenizer
     # Sum the probability mass over the plausible 'AI' spellings.
@@ -96,7 +95,8 @@ def propose(args):
     rank 0 as one review file.
     """
     dist = common.init_distributed()
-    env = InvestigationEnv(manifest_path=args.manifest, max_inspects=args.max_inspects, shuffle=False)
+    env = InvestigationEnv(manifest_path=args.manifest, max_inspects=args.max_inspects,
+                           shuffle=False, dataset=args.dataset)
     fakes = [
         (i, r) for i, r in enumerate(env.records)
         if r.get("split") == "test" and int(r["label"]) == 1
@@ -123,6 +123,7 @@ def propose(args):
         scores = _p_ai(
             model, processor,
             [image] + [_occlude(image, c, args.grid) for c in cells],
+            prompt=prompts.classify_prompt(dataset=args.dataset),
             batch_size=args.batch_size,
         )
         base, drops = scores[0], {c: scores[0] - s for c, s in zip(cells, scores[1:])}
@@ -140,17 +141,19 @@ def propose(args):
     rows = common.gather_lists(rows)
     if dist.is_main:
         rows.sort(key=lambda r: r["index"])
-        with open(REVIEW_PATH, "w") as f:
+        with open(review_path(args.dataset), "w") as f:
             for row in rows:
                 f.write(json.dumps(row) + "\n")
-        print(f"Wrote {len(rows)} proposals to {REVIEW_PATH}. Hand-verify 'artifact_cells' "
+        print(f"Wrote {len(rows)} proposals to {review_path(args.dataset)}. "
+              f"Hand-verify 'artifact_cells' "
               f"per row, then run --finalize.")
     common.cleanup_distributed()
 
 
 def finalize(args):
     kept = 0
-    with open(REVIEW_PATH) as fin, open(FINAL_PATH, "w") as fout:
+    review, final = review_path(args.dataset), final_path(args.dataset)
+    with open(review) as fin, open(final, "w") as fout:
         for line in fin:
             if not line.strip():
                 continue
@@ -160,15 +163,18 @@ def finalize(args):
                 "artifact_cells": row.get("artifact_cells", []),
             }) + "\n")
             kept += 1
-    print(f"Wrote {kept} rows to {FINAL_PATH} "
-          f"({sum(1 for _ in open(FINAL_PATH))} total; empty artifact_cells = indistinguishable).")
+    print(f"Wrote {kept} rows to {final} "
+          f"({sum(1 for _ in open(final))} total; empty artifact_cells = indistinguishable).")
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=common.DEFAULT_MODEL,
                     help="HF repo id or registry alias (7b | 32b | 72b | auto).")
-    ap.add_argument("--manifest", default=common.DEFAULT_MANIFEST)
+    ap.add_argument("--dataset", default=common.DATASET,
+                    help="Dataset namespace: selects the manifest, the output paths, "
+                         "and the domain-specific classification question.")
+    ap.add_argument("--manifest", default=None)
     ap.add_argument("--max-inspects", type=int, default=4)
     ap.add_argument("--grid", type=int, default=4)
     ap.add_argument("--limit", type=int, default=120)
@@ -178,6 +184,7 @@ def main():
     ap.add_argument("--propose", action="store_true")
     ap.add_argument("--finalize", action="store_true")
     args = ap.parse_args()
+    args.manifest = args.manifest or common.manifest_path(args.dataset)
 
     if args.propose:
         propose(args)
