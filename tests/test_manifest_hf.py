@@ -128,3 +128,43 @@ def test_generators_are_stratified_independently():
     for gen in ("flux", "sdxl"):
         test_rows = [r for r in rows if r["generator"] == gen and r["split"] == "test"]
         assert len(test_rows) == 10
+
+
+# --------------------------------------------------------------------------- #
+# report_dimensions — resolution is only meaningful relative to the overview
+# --------------------------------------------------------------------------- #
+def _report(real_dims, fake_dims, min_edge, overview, capsys):
+    from data.build_manifest_hf import add_pass_frac, report_dimensions
+
+    report_dimensions(add_pass_frac(summarize_dims(real_dims), min_edge),
+                      add_pass_frac(summarize_dims(fake_dims), min_edge),
+                      min_edge, overview)
+    return capsys.readouterr().out
+
+
+def test_same_images_pass_or_fail_on_the_overview_setting(capsys):
+    """GenImage SD1.4 (512) + ImageNet (~375): unusable at 140, fine at 64.
+    There is no absolute pixel threshold — only the ratio matters."""
+    real, fake = landscape(30, 500, 375), square(30, 512)
+
+    at_140 = _report(real, fake, 384, 140, capsys)
+    assert "too low" in at_140
+    assert "--overview-long-edge" in at_140      # tells you what would work
+
+    at_64 = _report(real, fake, 384, 64, capsys)
+    assert "too low" not in at_64
+
+
+def test_faces_fail_at_any_sane_overview(capsys):
+    """300px with 75px cells: the ratio can be rescued, the absolute detail
+    cannot. Blurring harder does raise the gain, which is exactly why the gain
+    number alone is not the whole story."""
+    out = _report(landscape(20, 300, 300), landscape(20, 300, 300), 256, 140, capsys)
+    assert "too low" in out
+    assert "cell 75px" in out
+
+
+def test_gain_is_reported_per_class(capsys):
+    out = _report(square(10, 1024), square(10, 1024), 512, 140, capsys)
+    assert "7.3x" in out
+    assert "too low" not in out

@@ -68,7 +68,7 @@ def pick_image_column(ds, override: str | None) -> str:
 
 
 def stream_class(repo, split, config, image_col, want, min_edge, aspect_range,
-                 out_dir, prefix, fmt, survey=False):
+                 out_dir, prefix, fmt, survey=False, label_col=None, keep_label=None):
     """Stream ``repo`` and save the first ``want`` images that pass the filters.
 
     Returns (paths, dims, rejected) where dims is a list of (w, h). Stops reading
@@ -89,6 +89,10 @@ def stream_class(repo, split, config, image_col, want, min_edge, aspect_range,
         if len(dims if survey else paths) >= want:
             break
         seen += 1
+        # Single-repo datasets carry both classes with a label column; take only
+        # the rows for the class being streamed.
+        if label_col is not None and row.get(label_col) != keep_label:
+            continue
         img = row.get(col)
         if img is None:
             rejected["no_image"] += 1
@@ -200,7 +204,11 @@ def shortcut_warnings(real: dict, fake: dict) -> list[str]:
     return out
 
 
-def report_dimensions(r_sum: dict, f_sum: dict, min_edge: int) -> None:
+MIN_USEFUL_GAIN = 4.0   # faces failed at 2.1x; 7x is the design target
+
+
+def report_dimensions(r_sum: dict, f_sum: dict, min_edge: int,
+                      overview_long_edge: int = 140) -> None:
     """The check that decides whether a substrate is honest.
 
     Two questions at once: are the images big enough for INSPECT to reveal
@@ -219,16 +227,26 @@ def report_dimensions(r_sum: dict, f_sum: dict, min_edge: int) -> None:
         print(f"  {name:<6}{s['n']:>6}{edge:>26}{asp:>24}"
               f"{s['square_frac']:>8.0%}{s.get('pass_frac', 0):>10.0%}")
 
-    # Resolution first: a 4x4 cell of a 512px image is 128 real pixels. Below
-    # that, INSPECT upscales a blur and the core mechanic returns nothing —
-    # the failure recorded in results/faces_negative_result.md.
+    # Resolution is only meaningful RELATIVE to the overview: what INSPECT buys
+    # is native/overview_long_edge, so there is no absolute pixel threshold.
+    # 1024 vs an overview of 140 and 512 vs 70 are the same 7.3x zoom. Faces
+    # failed at 2.1x (results/faces_negative_result.md).
+    print(f"\n  INSPECT zoom factor at --overview-long-edge {overview_long_edge} "
+          f"(target ~7x, unusable below {MIN_USEFUL_GAIN}x):")
+    worst = None
     for name, s in (("real", r_sum), ("ai", f_sum)):
-        if s and s["short_med"] < 512:
-            print(f"\n  ⚠ {name}: median short edge {s['short_med']}px -> a 4x4 cell is "
-                  f"~{s['short_med'] // 4}px.")
-            print(f"    INSPECT would upscale a blur. This substrate cannot support the "
-                  f"mechanic;")
-            print(f"    it is the faces failure again (results/faces_negative_result.md).")
+        if not s:
+            continue
+        gain = s["short_med"] / overview_long_edge
+        cell = s["short_med"] // 4
+        flag = "" if gain >= MIN_USEFUL_GAIN else "   <-- too low"
+        print(f"    {name:<5} {s['short_med']:>5}px / {overview_long_edge} = "
+              f"{gain:>4.1f}x   (cell {cell}px){flag}")
+        worst = gain if worst is None else min(worst, gain)
+    if worst is not None and worst < MIN_USEFUL_GAIN:
+        need = int(min(s["short_med"] for s in (r_sum, f_sum) if s) / 7)
+        print(f"    -> INSPECT would upscale a blur. Either use larger images, or blur")
+        print(f"       the overview harder: --overview-long-edge {need} would give ~7x.")
 
     warnings = shortcut_warnings(r_sum, f_sum)
     if warnings:
@@ -259,8 +277,17 @@ def assign_splits(rows, val: float, test: float, seed: int) -> None:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--real", required=True, help="HF dataset id holding REAL images.")
-    ap.add_argument("--fake", required=True, help="HF dataset id holding AI images.")
+    ap.add_argument("--real", default=None, help="HF dataset id holding REAL images.")
+    ap.add_argument("--fake", default=None, help="HF dataset id holding AI images.")
+    ap.add_argument("--repo", default=None,
+                    help="ONE dataset holding both classes, split by --label-column. "
+                         "Use instead of --real/--fake.")
+    ap.add_argument("--label-column", default="label",
+                    help="With --repo: the column separating the classes.")
+    ap.add_argument("--real-value", default="0",
+                    help="With --repo: --label-column value meaning REAL (int if numeric).")
+    ap.add_argument("--fake-value", default="1",
+                    help="With --repo: --label-column value meaning AI.")
     ap.add_argument("--dataset", required=True,
                     help="Local namespace: data/<dataset>/, checkpoints/<dataset>/, ...")
     ap.add_argument("--generator", default=None,
@@ -287,6 +314,11 @@ def main():
     ap.add_argument("--val", type=float, default=0.1)
     ap.add_argument("--test", type=float, default=0.1)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--overview-long-edge", type=int, default=140,
+                    help="The overview resolution these images will be used with. Only "
+                         "the ratio native/overview matters, so this decides whether a "
+                         "given size is usable: 1024 with 140 and 512 with 70 are the "
+                         "same 7x zoom. Must match what you pass to the training scripts.")
     ap.add_argument("--survey", action="store_true",
                     help="Report each class's dimensions and stop. Writes no images and "
                          "no manifest, ignores --min-edge/--aspect-range. Use it to screen "
@@ -294,6 +326,23 @@ def main():
     ap.add_argument("--survey-n", type=int, default=200,
                     help="Images sampled per class in --survey mode.")
     args = ap.parse_args()
+
+    def _coerce(v):
+        try:
+            return int(v)
+        except ValueError:
+            return v
+
+    if args.repo:
+        if args.real or args.fake:
+            raise SystemExit("Use --repo OR --real/--fake, not both.")
+        args.real = args.fake = args.repo
+        real_label, fake_label = _coerce(args.real_value), _coerce(args.fake_value)
+        label_col = args.label_column
+    elif args.real and args.fake:
+        real_label = fake_label = label_col = None
+    else:
+        raise SystemExit("Need either --repo, or both --real and --fake.")
 
     generator = args.generator or args.fake.split("/")[-1].split("___")[-1].lower()
     aspect_range = None
@@ -313,17 +362,19 @@ def main():
     real_paths, real_dims, _ = stream_class(
         args.real, args.real_split, args.real_config, args.image_column,
         want, args.min_edge, aspect_range,
-        os.path.join(img_root, "real"), "real", fmt, survey=args.survey)
+        os.path.join(img_root, "real"), "real", fmt, survey=args.survey,
+        label_col=label_col, keep_label=real_label)
     print(f"  [ai]   {args.fake}")
     fake_paths, fake_dims, _ = stream_class(
         args.fake, args.fake_split, args.fake_config, args.image_column,
         want, args.min_edge, aspect_range,
-        os.path.join(img_root, "ai"), "ai", fmt, survey=args.survey)
+        os.path.join(img_root, "ai"), "ai", fmt, survey=args.survey,
+        label_col=label_col, keep_label=fake_label)
 
     if args.survey:
         report_dimensions(add_pass_frac(summarize_dims(real_dims), args.min_edge),
                           add_pass_frac(summarize_dims(fake_dims), args.min_edge),
-                          args.min_edge)
+                          args.min_edge, args.overview_long_edge)
         return
 
     if not real_paths or not fake_paths:
@@ -359,7 +410,7 @@ def main():
 
     report_dimensions(add_pass_frac(summarize_dims(real_dims), args.min_edge),
                       add_pass_frac(summarize_dims(fake_dims), args.min_edge),
-                      args.min_edge)
+                      args.min_edge, args.overview_long_edge)
 
     print(f"\nNext — confirm it empirically before training anything:")
     print(f"  VRR_DATASET={args.dataset} python tools/ceiling_probe.py "
