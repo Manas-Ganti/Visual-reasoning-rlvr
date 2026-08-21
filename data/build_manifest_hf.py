@@ -90,7 +90,13 @@ def stream_class(repo, split, config, image_col, want, min_edge, aspect_range,
     rejected = Counter()
     seen = 0
 
-    for row in ds:
+    # Abandoning a streaming iterator mid-shard leaves HF's background reader
+    # thread alive, and its teardown aborts the interpreter with
+    # "PyGILState_Release: thread state must be current". Harmless to the data —
+    # everything is already written — but it exits NONZERO, which would make a
+    # SLURM launcher treat a successful build as a failure. Close it explicitly.
+    it = iter(ds)
+    for row in it:
         if len(dims if survey else paths) >= want:
             break
         seen += 1
@@ -146,6 +152,14 @@ def stream_class(repo, split, config, image_col, want, min_edge, aspect_range,
         if len(paths) == 1 or len(paths) % 25 == 0:
             print(f"    kept {len(paths)}/{want} (seen {seen}, "
                   f"{time.time() - t0:.0f}s)", flush=True)
+
+    for _closer in (getattr(it, "close", None),):
+        if _closer is not None:
+            try:
+                _closer()
+            except Exception:
+                pass
+    del it, ds
 
     if not survey and len(paths) < want:
         print(f"  ! only kept {len(paths)}/{want} from {repo} after {seen} rows "
@@ -435,3 +449,9 @@ def main():
 
 if __name__ == "__main__":
     main()
+    # Belt and braces on the same issue: everything is written and flushed by
+    # now, so skip interpreter finalization rather than let a lingering reader
+    # thread turn a completed build into a nonzero exit.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
