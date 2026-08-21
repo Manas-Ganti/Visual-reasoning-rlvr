@@ -74,8 +74,13 @@ def stream_class(repo, split, config, image_col, want, min_edge, aspect_range,
     Returns (paths, dims, rejected) where dims is a list of (w, h). Stops reading
     as soon as ``want`` images are kept — the whole point of streaming.
     """
+    import time
+
     from datasets import load_dataset
 
+    t0 = time.time()
+    print(f"    connecting to {repo}"
+          f"{f' [{config}]' if config else ''} split={split} ...", flush=True)
     ds = load_dataset(repo, name=config, split=split, streaming=True)
     col = pick_image_column(ds, image_col)
 
@@ -103,14 +108,22 @@ def stream_class(repo, split, config, image_col, want, min_edge, aspect_range,
             rejected["unreadable"] += 1
             continue
 
+        if seen % 2000 == 0:
+            print(f"    ...read {seen} rows, kept {len(paths)} "
+                  f"({time.time() - t0:.0f}s)", flush=True)
+
         w, h = img.size
         # Survey: record the geometry of everything, filter nothing, write
         # nothing. This is how you find out what a candidate repo actually
         # holds before committing to it.
         if survey:
             dims.append((w, h))
-            if len(dims) % 100 == 0:
-                print(f"    surveyed {len(dims)}/{want}", flush=True)
+            # Report the first image immediately, then every 25. A stream that
+            # only speaks every 100 images is indistinguishable from a hang, and
+            # the first row is the one that proves the connection works at all.
+            if len(dims) == 1 or len(dims) % 25 == 0:
+                print(f"    surveyed {len(dims)}/{want}  ({w}x{h}, "
+                      f"{time.time() - t0:.0f}s)", flush=True)
             continue
         if min(w, h) < min_edge:
             rejected["too_small"] += 1
@@ -130,8 +143,9 @@ def stream_class(repo, split, config, image_col, want, min_edge, aspect_range,
         paths.append(path)
         dims.append((w, h))
 
-        if len(paths) % 100 == 0:
-            print(f"    kept {len(paths)}/{want} (seen {seen})", flush=True)
+        if len(paths) == 1 or len(paths) % 25 == 0:
+            print(f"    kept {len(paths)}/{want} (seen {seen}, "
+                  f"{time.time() - t0:.0f}s)", flush=True)
 
     if not survey and len(paths) < want:
         print(f"  ! only kept {len(paths)}/{want} from {repo} after {seen} rows "
