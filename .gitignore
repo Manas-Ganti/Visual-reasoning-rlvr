@@ -33,3 +33,6 @@ env-venv/
 *.swp
 .idea/
 .vscode/
+
+# --- Local download config (scripts/fetch_genimage.sh --init-links) ---
+genimage_links.txt

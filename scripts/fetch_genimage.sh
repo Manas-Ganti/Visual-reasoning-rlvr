@@ -33,7 +33,17 @@
 set -euo pipefail
 
 # --------------------------------------------------------------------------- #
-# EDIT THIS: one "Name|URL" per generator. Leave a URL empty to skip that one.
+# PREFERRED: keep your links in an untracked file instead of editing this one.
+#
+#     bash scripts/fetch_genimage.sh --init-links     # writes genimage_links.txt
+#     $EDITOR genimage_links.txt                      # paste the URLs there
+#     bash scripts/fetch_genimage.sh
+#
+# genimage_links.txt is gitignored, so `git pull` never conflicts with your
+# edits. If it exists it REPLACES the table below. Override the path with
+# --links PATH or $GENIMAGE_LINKS.
+#
+# FALLBACK: one "Name|URL" per generator. Leave a URL empty to skip that one.
 # Get each link from the Drive folder listing: right-click the generator folder
 # -> Copy link. Downloading the four you need separately (rather than the whole
 # parent folder) gives restartable progress instead of one long job that can
@@ -60,13 +70,18 @@ RCLONE_REMOTE="${RCLONE_REMOTE:-gdrive}"  # rclone remote name, for METHOD=rclon
 TRANSFERS="${TRANSFERS:-8}"
 FORCE=0
 DRY_RUN=0
+INIT_LINKS=0
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LINKS_FILE="${GENIMAGE_LINKS:-$REPO_ROOT/genimage_links.txt}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --dest) DEST="$2"; shift 2 ;;
+    --links) LINKS_FILE="$2"; shift 2 ;;
+    --init-links) INIT_LINKS=1; shift ;;
     --force) FORCE=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
-    -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -74,6 +89,49 @@ done
 LOG_DIR="${LOG_DIR:-$DEST/_logs}"
 say() { printf '[fetch] %s\n' "$*"; }
 die() { printf '[fetch] ERROR: %s\n' "$*" >&2; exit 1; }
+
+if [ "$INIT_LINKS" -eq 1 ]; then
+  [ -e "$LINKS_FILE" ] && die "$LINKS_FILE already exists — edit it, or pass --links PATH."
+  {
+    echo "# GenImage download links — one Name|URL per line."
+    echo "# Untracked, so 'git pull' never conflicts with your edits."
+    echo "#"
+    echo "# Point each URL at the generator's val/ subfolder, not the whole folder:"
+    echo "# val alone holds thousands of images per class against the few hundred"
+    echo "# needed, and skipping train/ cuts the download roughly 25x."
+    echo "#"
+    echo "# Parent folder:"
+    echo "#   https://drive.google.com/drive/folders/1jGt10bwTbhEZuGXLyvrCuxOI0cBqQ1FS"
+    echo "# Right-click a generator folder -> Copy link. Leave a URL empty to skip it."
+    echo ""
+    echo "ADM|"
+    echo "BigGAN|"
+    echo "Midjourney|"
+    echo "stable_diffusion_v_1_4|"
+    echo ""
+    echo "# Optional extras beyond the four-generator mix:"
+    echo "# stable_diffusion_v_1_5|"
+    echo "# glide|"
+    echo "# VQDM|"
+    echo "# wukong|"
+  } > "$LINKS_FILE"
+  say "wrote $LINKS_FILE — paste your Drive links into it, then re-run."
+  exit 0
+fi
+
+# An untracked links file wins over the in-script table, so the tracked script
+# never needs local edits and pulls stay clean.
+if [ -f "$LINKS_FILE" ]; then
+  LINKS=()
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ""|\#*) continue ;; esac
+    case "$line" in *"|"*) LINKS+=("$line") ;; esac
+  done < "$LINKS_FILE"
+  [ ${#LINKS[@]} -gt 0 ] || die "$LINKS_FILE has no 'Name|URL' lines."
+  say "links       : $LINKS_FILE (${#LINKS[@]} entries)"
+else
+  say "links       : in-script table (run --init-links to move them to a file)"
+fi
 
 # Drive folder -> the canonical name data/build_manifest_genimage.py resolves it
 # to, so the script can print the exact --generators value at the end.
