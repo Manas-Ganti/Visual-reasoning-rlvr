@@ -93,6 +93,26 @@ canonical() {
 
 count_files() { find "$1" -type f ! -name '*.zip' 2>/dev/null | wc -l | tr -d ' '; }
 
+# One folder download, through whichever form resolve_gdown found.
+# --remaining-ok / remaining_ok lifts gdown's 50-files-per-folder cap; older
+# releases lack the kwarg, hence the retry without it.
+gdown_folder() {
+  if [ "$GDOWN_MODE" = "cli" ]; then
+    $GDOWN --folder --remaining-ok -O "$2" "$1"
+  else
+    python - "$1" "$2" <<'PYEOF'
+import sys
+import gdown
+
+url, out = sys.argv[1], sys.argv[2]
+try:
+    gdown.download_folder(url=url, output=out, quiet=False, remaining_ok=True)
+except TypeError:
+    gdown.download_folder(url=url, output=out, quiet=False)
+PYEOF
+  fi
+}
+
 # --------------------------------------------------------------------------- #
 # Preflight
 # --------------------------------------------------------------------------- #
@@ -106,6 +126,7 @@ esac
 # neither tool installed.
 _tool_checked=0
 GDOWN=""
+GDOWN_MODE=""     # cli | api
 
 # `pip install --user` puts the gdown launcher in ~/.local/bin, which is not on
 # PATH on a default ARC login shell — so an installed gdown looks missing to
@@ -114,18 +135,30 @@ GDOWN=""
 resolve_gdown() {
   # Explicit override wins: GDOWN="/path/to/gdown" or GDOWN="python3.11 -m gdown"
   if [ -n "${GDOWN:-}" ]; then
+    GDOWN_MODE="cli"
     say "gdown       : $GDOWN (from \$GDOWN)"
     return 0
   fi
   local cand
-  for cand in "gdown" "$HOME/.local/bin/gdown" "python -m gdown" "python3 -m gdown" \
-              "$(command -v python3 || echo python3) -m gdown"; do
-    if $cand --version >/dev/null 2>&1; then
-      GDOWN="$cand"
+  # --help rather than --version: every gdown release accepts it, and some drop
+  # or rename --version between majors.
+  for cand in "gdown" "$HOME/.local/bin/gdown" "python -m gdown" "python3 -m gdown"; do
+    if $cand --help >/dev/null 2>&1; then
+      GDOWN="$cand"; GDOWN_MODE="cli"
       say "gdown       : $GDOWN"
       return 0
     fi
   done
+
+  # No usable CLI, but the library may still be importable — a --user install
+  # whose console script never landed on PATH, or a release that dropped
+  # __main__.py. The Python API needs nothing but a working `import gdown`, so
+  # this removes the entire console-script/PATH failure class.
+  if python -c "import gdown" >/dev/null 2>&1; then
+    GDOWN_MODE="api"
+    say "gdown       : python API ($(python -c 'import gdown;print("gdown "+gdown.__version__)' 2>/dev/null))"
+    return 0
+  fi
 
   # Nothing worked. Print what we actually inspected — "not found" alone sends
   # people to reinstall a gdown that is already installed, when the real cause
@@ -200,8 +233,7 @@ for entry in "${LINKS[@]}"; do
   # Never let one failed generator abort the others — record and carry on, so an
   # overnight run does not die at 3am on a single Drive quota error.
   if [ "$METHOD" = "gdown" ]; then
-    # --remaining-ok lifts gdown's 50-files-per-folder cap.
-    $GDOWN --folder --remaining-ok -O "$target" "$url" 2>&1 | tee "$log" || \
+    gdown_folder "$url" "$target" 2>&1 | tee "$log" || \
       say "WARNING: $name failed — see $log (try METHOD=rclone)"
   else
     rclone copy "${RCLONE_REMOTE}:${url}" "$target" -P --transfers "$TRANSFERS" 2>&1 | tee "$log" || \
