@@ -308,13 +308,50 @@ fi
 # --------------------------------------------------------------------------- #
 # Extract any archives
 # --------------------------------------------------------------------------- #
+# GenImage ships each generator as a SPLIT zip: name.z01 .. name.zNN plus a
+# final name.zip holding the central directory. plain `unzip name.zip` fails on
+# these — every part has to be present and read as one archive.
+#
+# 7z reads a split set in place. `zip -s 0` also works but writes a joined copy
+# first, so it needs a second full copy of the archive on disk (~23 GB per
+# generator here) — which is why 7z is tried first.
+extract_archive() {
+  local z="$1" dir base
+  dir="$(dirname "$z")"
+  base="${z%.zip}"
+
+  if ! compgen -G "${base}.z[0-9][0-9]" >/dev/null 2>&1; then
+    unzip -q -o "$z" -d "$dir"
+    return
+  fi
+
+  local parts
+  parts=$(ls "${base}".z[0-9][0-9] 2>/dev/null | wc -l | tr -d ' ')
+  say "  split archive: $(basename "$z") + $parts part(s)"
+
+  if command -v 7z >/dev/null 2>&1; then
+    7z x -y -bso0 -o"$dir" "$z"
+  elif command -v 7za >/dev/null 2>&1; then
+    7za x -y -bso0 -o"$dir" "$z"
+  elif command -v zip >/dev/null 2>&1; then
+    say "  no 7z — joining with 'zip -s 0' (needs ~$(du -ch "${base}".z* "$z" 2>/dev/null | tail -1 | cut -f1) of extra space)"
+    zip -q -s 0 "$z" --out "${base}.joined.zip" \
+      && unzip -q -o "${base}.joined.zip" -d "$dir" \
+      && rm -f "${base}.joined.zip"
+  else
+    say "  ERROR: need 7z (preferred) or zip to extract a split archive."
+    say "         try: module spider p7zip   |   module load p7zip"
+    return 1
+  fi
+}
+
 zips="$(find "$DEST" -name '*.zip' -type f 2>/dev/null | wc -l | tr -d ' ')"
 if [ "$zips" -gt 0 ]; then
   say "extracting $zips archive(s)"
-  find "$DEST" -name '*.zip' -type f -print0 | while IFS= read -r -d '' z; do
-    say "  unzip $(basename "$z")"
-    unzip -q -o "$z" -d "$(dirname "$z")" || say "  WARNING: failed to unzip $z"
-  done
+  while IFS= read -r z; do
+    say "  extract $(basename "$z")"
+    extract_archive "$z" || say "  WARNING: failed to extract $z"
+  done < <(find "$DEST" -name '*.zip' -type f ! -name '*.joined.zip' 2>/dev/null)
 fi
 
 # --------------------------------------------------------------------------- #

@@ -143,6 +143,12 @@ def main():
     ap.add_argument("--val", type=float, default=0.1)
     ap.add_argument("--test", type=float, default=0.1)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--out", default=None,
+                    help="Manifest path (default: data/<dataset>/manifest.jsonl). Use this to "
+                         "build one generator at a time on a tight disk — download, extract, "
+                         "build to its own file, delete the source, repeat, then concatenate. "
+                         "Splits are stratified by (generator, label), so per-generator runs "
+                         "and one combined run produce identical splits.")
     args = ap.parse_args()
 
     out_dir = common.dataset_dir(args.dataset)
@@ -209,8 +215,8 @@ def main():
             r["split"] = "val" if i < n_val else ("test" if i < n_val + n_test else "train")
 
     rows.sort(key=lambda r: r["id"])
-    manifest = common.manifest_path(args.dataset)
-    os.makedirs(os.path.dirname(manifest), exist_ok=True)
+    manifest = args.out or common.manifest_path(args.dataset)
+    os.makedirs(os.path.dirname(os.path.abspath(manifest)), exist_ok=True)
     with open(manifest, "w") as f:
         for r in rows:
             f.write(json.dumps(r) + "\n")
