@@ -64,7 +64,17 @@ LINKS=(
 )
 
 # --------------------------------------------------------------------------- #
-DEST="${DEST:-/projects/${USER}/GenImage}"
+# Prefer project/scratch storage, but only if it actually exists and is
+# writable — not every ARC user has a project allocation, and a bare
+# "mkdir: Permission denied" is a poor way to find that out.
+_default_dest() {
+  local c
+  for c in "/projects/$USER" "/work/$USER" "/globalscratch/$USER"; do
+    [ -d "$c" ] && [ -w "$c" ] && { printf '%s/GenImage' "$c"; return; }
+  done
+  printf '%s/GenImage' "$HOME"
+}
+DEST="${DEST:-$(_default_dest)}"
 METHOD="${METHOD:-gdown}"                 # gdown | rclone
 RCLONE_REMOTE="${RCLONE_REMOTE:-gdrive}"  # rclone remote name, for METHOD=rclone
 TRANSFERS="${TRANSFERS:-8}"
@@ -152,11 +162,13 @@ canonical() {
 count_files() { find "$1" -type f ! -name '*.zip' 2>/dev/null | wc -l | tr -d ' '; }
 
 # One folder download, through whichever form resolve_gdown found.
-# --remaining-ok / remaining_ok lifts gdown's 50-files-per-folder cap; older
-# releases lack the kwarg, hence the retry without it.
+# gdown 5.x needs --remaining-ok / remaining_ok to lift a 50-files-per-folder
+# cap; 6.x dropped both the cap and the flag, and passing it there is a hard
+# argparse error. So the CLI form probes --help and the API form retries on
+# TypeError rather than either assuming a version.
 gdown_folder() {
   if [ "$GDOWN_MODE" = "cli" ]; then
-    $GDOWN --folder --remaining-ok -O "$2" "$1"
+    $GDOWN --folder $GDOWN_EXTRA -O "$2" "$1"
   else
     python - "$1" "$2" <<'PYEOF'
 import sys
@@ -185,6 +197,7 @@ esac
 _tool_checked=0
 GDOWN=""
 GDOWN_MODE=""     # cli | api
+GDOWN_EXTRA=""    # --remaining-ok, only where the installed gdown accepts it
 
 # `pip install --user` puts the gdown launcher in ~/.local/bin, which is not on
 # PATH on a default ARC login shell — so an installed gdown looks missing to
@@ -194,6 +207,7 @@ resolve_gdown() {
   # Explicit override wins: GDOWN="/path/to/gdown" or GDOWN="python3.11 -m gdown"
   if [ -n "${GDOWN:-}" ]; then
     GDOWN_MODE="cli"
+    $GDOWN --help 2>&1 | grep -q -- "--remaining-ok" && GDOWN_EXTRA="--remaining-ok"
     say "gdown       : $GDOWN (from \$GDOWN)"
     return 0
   fi
@@ -203,7 +217,10 @@ resolve_gdown() {
   for cand in "gdown" "$HOME/.local/bin/gdown" "python -m gdown" "python3 -m gdown"; do
     if $cand --help >/dev/null 2>&1; then
       GDOWN="$cand"; GDOWN_MODE="cli"
-      say "gdown       : $GDOWN"
+      if $cand --help 2>&1 | grep -q -- "--remaining-ok"; then
+        GDOWN_EXTRA="--remaining-ok"
+      fi
+      say "gdown       : $GDOWN${GDOWN_EXTRA:+ (with $GDOWN_EXTRA)}"
       return 0
     fi
   done
@@ -253,7 +270,12 @@ require_tool() {
   _tool_checked=1
 }
 
-[ "$DRY_RUN" -eq 0 ] && mkdir -p "$DEST" "$LOG_DIR"
+if [ "$DRY_RUN" -eq 0 ]; then
+  mkdir -p "$DEST" "$LOG_DIR" 2>/dev/null || die \
+    "cannot create $DEST
+       Pick a writable location:  --dest \$HOME/GenImage
+       (checked /projects/\$USER, /work/\$USER, /globalscratch/\$USER — none usable)"
+fi
 
 say "destination : $DEST"
 say "method      : $METHOD"
