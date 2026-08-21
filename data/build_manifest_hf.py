@@ -288,6 +288,30 @@ def report_dimensions(r_sum: dict, f_sum: dict, min_edge: int,
         print("\n  no obvious shortcut: the two classes look alike in shape and size.")
 
 
+def scan_written(img_root: str) -> tuple[list[str], list[str]]:
+    """Image paths already on disk, so the manifest step is independent of which
+    process streamed them."""
+    out = []
+    for sub in ("real", "ai"):
+        d = os.path.join(img_root, sub)
+        files = sorted(os.path.join(d, f) for f in os.listdir(d)) if os.path.isdir(d) else []
+        out.append(files)
+    return out[0], out[1]
+
+
+def dims_of(paths: list[str]) -> list[tuple[int, int]]:
+    from PIL import Image as _Image
+
+    dims = []
+    for p in paths:
+        try:
+            with _Image.open(p) as im:
+                dims.append(im.size)
+        except Exception:
+            pass
+    return dims
+
+
 def assign_splits(rows, val: float, test: float, seed: int) -> None:
     """Stratified by (generator, label), matching build_manifest_genimage."""
     rng = random.Random(seed)
@@ -301,6 +325,51 @@ def assign_splits(rows, val: float, test: float, seed: int) -> None:
         n_test = max(1, int(n * test)) if n >= 10 else 0
         for i, r in enumerate(stratum):
             r["split"] = "val" if i < n_val else ("test" if i < n_val + n_test else "train")
+
+
+def write_manifest(args, generator, real_paths, fake_paths, real_dims, fake_dims):
+    """Emit the manifest + the dimension report. Shared by the streaming path and
+    --finalize, so a manifest built from disk is identical to one built in-process."""
+    if not real_paths or not fake_paths:
+        raise SystemExit("One class is empty — check --min-edge, the splits, and that "
+                         "both halves actually streamed (--only real / --only ai).")
+
+    rows = []
+    for label, paths in ((0, real_paths), (1, fake_paths)):
+        sub = "ai" if label else "real"
+        for i, p in enumerate(paths):
+            rows.append({
+                "id": f"{generator}_{sub}_{i:06d}",
+                "file_name": os.path.relpath(p, common.REPO_ROOT),
+                "label": label,
+                "generator": generator,
+            })
+
+    assign_splits(rows, args.val, args.test, args.seed)
+    rows.sort(key=lambda r: r["id"])
+
+    manifest = args.out or common.manifest_path(args.dataset)
+    os.makedirs(os.path.dirname(os.path.abspath(manifest)), exist_ok=True)
+    with open(manifest, "w") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+
+    labels = Counter(r["label"] for r in rows)
+    splits = Counter(r["split"] for r in rows)
+    print(f"\nWrote {len(rows)} rows -> {manifest}")
+    print(f"  splits {dict(splits)}")
+    print(f"  labels AI={labels[1]} REAL={labels[0]} "
+          f"(majority baseline {max(labels.values()) / len(rows):.3f})")
+
+    report_dimensions(add_pass_frac(summarize_dims(real_dims), args.min_edge),
+                      add_pass_frac(summarize_dims(fake_dims), args.min_edge),
+                      args.min_edge, args.overview_long_edge)
+
+    print("\nNext — confirm it empirically before training anything:")
+    print(f"  VRR_DATASET={args.dataset} python tools/ceiling_probe.py "
+          "--backend vllm --tensor-parallel-size 2 --condition full     # want >=0.85")
+    print(f"  VRR_DATASET={args.dataset} python tools/ceiling_probe.py "
+          "--backend vllm --tensor-parallel-size 2 --condition overview  # want ~chance")
 
 
 def main():
@@ -347,6 +416,14 @@ def main():
                          "the ratio native/overview matters, so this decides whether a "
                          "given size is usable: 1024 with 140 and 512 with 70 are the "
                          "same 7x zoom. Must match what you pass to the training scripts.")
+    ap.add_argument("--only", choices=["real", "ai", "both"], default="both",
+                    help="Stream one class and stop. Two streams in one process can "
+                         "collide — webdataset sources leave background readers alive "
+                         "that the next load_dataset contends with — and a stall on the "
+                         "second half would otherwise discard the first. Run "
+                         "--only real, then --only ai, then --finalize.")
+    ap.add_argument("--finalize", action="store_true",
+                    help="Write the manifest from images already on disk. No streaming.")
     ap.add_argument("--survey", action="store_true",
                     help="Report each class's dimensions and stop. Writes no images and "
                          "no manifest, ignores --min-edge/--aspect-range. Use it to screen "
@@ -386,18 +463,32 @@ def main():
           f"aspect_range={aspect_range} format={fmt}")
 
     want = args.survey_n if args.survey else args.per_class
-    print(f"  [real] {args.real}")
-    real_paths, real_dims, _ = stream_class(
-        args.real, args.real_split, args.real_config, args.image_column,
-        want, args.min_edge, aspect_range,
-        os.path.join(img_root, "real"), "real", fmt, survey=args.survey,
-        label_col=label_col, keep_label=real_label)
-    print(f"  [ai]   {args.fake}")
-    fake_paths, fake_dims, _ = stream_class(
-        args.fake, args.fake_split, args.fake_config, args.image_column,
-        want, args.min_edge, aspect_range,
-        os.path.join(img_root, "ai"), "ai", fmt, survey=args.survey,
-        label_col=label_col, keep_label=fake_label)
+
+    if args.finalize:
+        real_paths, fake_paths = scan_written(img_root)
+        print(f"Finalizing from disk: {len(real_paths)} real, {len(fake_paths)} ai")
+        real_dims, fake_dims = dims_of(real_paths), dims_of(fake_paths)
+        write_manifest(args, generator, real_paths, fake_paths, real_dims, fake_dims)
+        return
+
+    real_paths = fake_paths = []
+    real_dims = fake_dims = []
+
+    if args.only in ("real", "both"):
+        print(f"  [real] {args.real}")
+        real_paths, real_dims, _ = stream_class(
+            args.real, args.real_split, args.real_config, args.image_column,
+            want, args.min_edge, aspect_range,
+            os.path.join(img_root, "real"), "real", fmt, survey=args.survey,
+            label_col=label_col, keep_label=real_label)
+
+    if args.only in ("ai", "both"):
+        print(f"  [ai]   {args.fake}")
+        fake_paths, fake_dims, _ = stream_class(
+            args.fake, args.fake_split, args.fake_config, args.image_column,
+            want, args.min_edge, aspect_range,
+            os.path.join(img_root, "ai"), "ai", fmt, survey=args.survey,
+            label_col=label_col, keep_label=fake_label)
 
     if args.survey:
         report_dimensions(add_pass_frac(summarize_dims(real_dims), args.min_edge),
@@ -405,46 +496,14 @@ def main():
                           args.min_edge, args.overview_long_edge)
         return
 
-    if not real_paths or not fake_paths:
-        raise SystemExit("One class came back empty — check --min-edge, the splits, "
-                         "and that both repos actually hold images.")
+    if args.only != "both":
+        done = "real" if args.only == "real" else "ai"
+        other = "ai" if done == "real" else "real"
+        print(f"\n{len(real_paths or fake_paths)} {done} images written to {img_root}/{done}")
+        print(f"Next:  --only {other}   (then --finalize to write the manifest)")
+        return
 
-    rows = []
-    for label, paths in ((0, real_paths), (1, fake_paths)):
-        sub = "ai" if label else "real"
-        for i, p in enumerate(paths):
-            rows.append({
-                "id": f"{generator}_{sub}_{i:06d}",
-                "file_name": os.path.relpath(p, common.REPO_ROOT),
-                "label": label,
-                "generator": generator,
-            })
-
-    assign_splits(rows, args.val, args.test, args.seed)
-    rows.sort(key=lambda r: r["id"])
-
-    manifest = args.out or common.manifest_path(args.dataset)
-    os.makedirs(os.path.dirname(os.path.abspath(manifest)), exist_ok=True)
-    with open(manifest, "w") as f:
-        for r in rows:
-            f.write(json.dumps(r) + "\n")
-
-    labels = Counter(r["label"] for r in rows)
-    splits = Counter(r["split"] for r in rows)
-    print(f"\nWrote {len(rows)} rows -> {manifest}")
-    print(f"  splits {dict(splits)}")
-    print(f"  labels AI={labels[1]} REAL={labels[0]} "
-          f"(majority baseline {max(labels.values()) / len(rows):.3f})")
-
-    report_dimensions(add_pass_frac(summarize_dims(real_dims), args.min_edge),
-                      add_pass_frac(summarize_dims(fake_dims), args.min_edge),
-                      args.min_edge, args.overview_long_edge)
-
-    print(f"\nNext — confirm it empirically before training anything:")
-    print(f"  VRR_DATASET={args.dataset} python tools/ceiling_probe.py "
-          "--backend vllm --tensor-parallel-size 2 --condition full     # want >=0.85")
-    print(f"  VRR_DATASET={args.dataset} python tools/ceiling_probe.py "
-          "--backend vllm --tensor-parallel-size 2 --condition overview  # want ~chance")
+    write_manifest(args, generator, real_paths, fake_paths, real_dims, fake_dims)
 
 
 if __name__ == "__main__":
