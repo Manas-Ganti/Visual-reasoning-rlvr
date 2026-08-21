@@ -233,9 +233,9 @@ def main():
     print(f"  images {'copied' if args.copy else 'symlinked'} under {img_dir}")
     print("\nNext: measure the ceiling and the floor before training anything —")
     print(f"  VRR_DATASET={args.dataset} python tools/ceiling_probe.py "
-          "--backend vllm --tensor-parallel-size 2 --domain image --condition full")
+          "--backend vllm --tensor-parallel-size 2 --condition full     # want >=0.85")
     print(f"  VRR_DATASET={args.dataset} python tools/ceiling_probe.py "
-          "--backend vllm --tensor-parallel-size 2 --domain image --condition overview")
+          "--backend vllm --tensor-parallel-size 2 --condition overview  # want ~chance")
 
 
 if __name__ == "__main__":
