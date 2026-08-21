@@ -68,7 +68,7 @@ def pick_image_column(ds, override: str | None) -> str:
 
 
 def stream_class(repo, split, config, image_col, want, min_edge, aspect_range,
-                 out_dir, prefix, fmt):
+                 out_dir, prefix, fmt, survey=False):
     """Stream ``repo`` and save the first ``want`` images that pass the filters.
 
     Returns (paths, dims, rejected) where dims is a list of (w, h). Stops reading
@@ -79,13 +79,14 @@ def stream_class(repo, split, config, image_col, want, min_edge, aspect_range,
     ds = load_dataset(repo, name=config, split=split, streaming=True)
     col = pick_image_column(ds, image_col)
 
-    os.makedirs(out_dir, exist_ok=True)
+    if not survey:
+        os.makedirs(out_dir, exist_ok=True)
     paths, dims = [], []
     rejected = Counter()
     seen = 0
 
     for row in ds:
-        if len(paths) >= want:
+        if len(dims if survey else paths) >= want:
             break
         seen += 1
         img = row.get(col)
@@ -99,6 +100,14 @@ def stream_class(repo, split, config, image_col, want, min_edge, aspect_range,
             continue
 
         w, h = img.size
+        # Survey: record the geometry of everything, filter nothing, write
+        # nothing. This is how you find out what a candidate repo actually
+        # holds before committing to it.
+        if survey:
+            dims.append((w, h))
+            if len(dims) % 100 == 0:
+                print(f"    surveyed {len(dims)}/{want}", flush=True)
+            continue
         if min(w, h) < min_edge:
             rejected["too_small"] += 1
             continue
@@ -120,9 +129,12 @@ def stream_class(repo, split, config, image_col, want, min_edge, aspect_range,
         if len(paths) % 100 == 0:
             print(f"    kept {len(paths)}/{want} (seen {seen})", flush=True)
 
-    if len(paths) < want:
+    if not survey and len(paths) < want:
         print(f"  ! only kept {len(paths)}/{want} from {repo} after {seen} rows "
               f"— rejected {dict(rejected)}")
+        if rejected.get("too_small"):
+            print(f"    {rejected['too_small']} were under --min-edge {min_edge}. "
+                  f"Run with --survey to see what sizes this repo actually holds.")
     return paths, dims, rejected
 
 
@@ -140,7 +152,17 @@ def summarize_dims(dims: list[tuple[int, int]]) -> dict:
         "aspect_med": round(mid(aspect), 3),
         "aspect_max": round(aspect[-1], 3),
         "square_frac": round(sum(0.95 <= a <= 1.05 for a in aspect) / len(aspect), 3),
+        "dims": dims,
     }
+
+
+def add_pass_frac(summary: dict, min_edge: int) -> dict:
+    """Share of images that would survive --min-edge — answers "will the real
+    build find enough?" without running it."""
+    if summary:
+        dims = summary["dims"]
+        summary["pass_frac"] = round(sum(min(w, h) >= min_edge for w, h in dims) / len(dims), 3)
+    return summary
 
 
 def shortcut_warnings(real: dict, fake: dict) -> list[str]:
@@ -176,6 +198,48 @@ def shortcut_warnings(real: dict, fake: dict) -> list[str]:
             f"{fake['short_med']}px — partly hidden by the VLM's token budget, "
             f"but worth checking with the floor probe")
     return out
+
+
+def report_dimensions(r_sum: dict, f_sum: dict, min_edge: int) -> None:
+    """The check that decides whether a substrate is honest.
+
+    Two questions at once: are the images big enough for INSPECT to reveal
+    anything (short edge), and is the label predictable without opening the
+    image (aspect / squareness)?
+    """
+    print("\n=== dimensions (is the label predictable WITHOUT looking?) ===")
+    print(f"  {'class':<6}{'n':>6}{'short edge min/med/max':>26}"
+          f"{'aspect min/med/max':>24}{'square':>8}{'>=' + str(min_edge):>10}")
+    for name, s in (("real", r_sum), ("ai", f_sum)):
+        if not s:
+            print(f"  {name:<6}{'(none)':>6}")
+            continue
+        edge = "{}/{}/{}".format(s["short_min"], s["short_med"], s["short_max"])
+        asp = "{}/{}/{}".format(s["aspect_min"], s["aspect_med"], s["aspect_max"])
+        print(f"  {name:<6}{s['n']:>6}{edge:>26}{asp:>24}"
+              f"{s['square_frac']:>8.0%}{s.get('pass_frac', 0):>10.0%}")
+
+    # Resolution first: a 4x4 cell of a 512px image is 128 real pixels. Below
+    # that, INSPECT upscales a blur and the core mechanic returns nothing —
+    # the failure recorded in results/faces_negative_result.md.
+    for name, s in (("real", r_sum), ("ai", f_sum)):
+        if s and s["short_med"] < 512:
+            print(f"\n  ⚠ {name}: median short edge {s['short_med']}px -> a 4x4 cell is "
+                  f"~{s['short_med'] // 4}px.")
+            print(f"    INSPECT would upscale a blur. This substrate cannot support the "
+                  f"mechanic;")
+            print(f"    it is the faces failure again (results/faces_negative_result.md).")
+
+    warnings = shortcut_warnings(r_sum, f_sum)
+    if warnings:
+        print("\n  ⚠ SHORTCUT RISK — these survive the overview downsample:")
+        for w in warnings:
+            print(f"    - {w}")
+        print("    Any of these lets the agent answer from the blurred overview without")
+        print("    investigating, which makes a high pass rate meaningless. Fix by")
+        print("    choosing better-matched sources, or filter with --aspect-range.")
+    elif r_sum and f_sum:
+        print("\n  no obvious shortcut: the two classes look alike in shape and size.")
 
 
 def assign_splits(rows, val: float, test: float, seed: int) -> None:
@@ -223,6 +287,12 @@ def main():
     ap.add_argument("--val", type=float, default=0.1)
     ap.add_argument("--test", type=float, default=0.1)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--survey", action="store_true",
+                    help="Report each class's dimensions and stop. Writes no images and "
+                         "no manifest, ignores --min-edge/--aspect-range. Use it to screen "
+                         "a candidate pair in seconds before committing to it.")
+    ap.add_argument("--survey-n", type=int, default=200,
+                    help="Images sampled per class in --survey mode.")
     args = ap.parse_args()
 
     generator = args.generator or args.fake.split("/")[-1].split("___")[-1].lower()
@@ -238,16 +308,23 @@ def main():
     print(f"  per-class={args.per_class} min_edge={args.min_edge} "
           f"aspect_range={aspect_range} format={fmt}")
 
+    want = args.survey_n if args.survey else args.per_class
     print(f"  [real] {args.real}")
     real_paths, real_dims, _ = stream_class(
         args.real, args.real_split, args.real_config, args.image_column,
-        args.per_class, args.min_edge, aspect_range,
-        os.path.join(img_root, "real"), "real", fmt)
+        want, args.min_edge, aspect_range,
+        os.path.join(img_root, "real"), "real", fmt, survey=args.survey)
     print(f"  [ai]   {args.fake}")
     fake_paths, fake_dims, _ = stream_class(
         args.fake, args.fake_split, args.fake_config, args.image_column,
-        args.per_class, args.min_edge, aspect_range,
-        os.path.join(img_root, "ai"), "ai", fmt)
+        want, args.min_edge, aspect_range,
+        os.path.join(img_root, "ai"), "ai", fmt, survey=args.survey)
+
+    if args.survey:
+        report_dimensions(add_pass_frac(summarize_dims(real_dims), args.min_edge),
+                          add_pass_frac(summarize_dims(fake_dims), args.min_edge),
+                          args.min_edge)
+        return
 
     if not real_paths or not fake_paths:
         raise SystemExit("One class came back empty — check --min-edge, the splits, "
@@ -280,25 +357,9 @@ def main():
     print(f"  labels AI={labels[1]} REAL={labels[0]} "
           f"(majority baseline {max(labels.values()) / len(rows):.3f})")
 
-    # ---- the check that decides whether this substrate is honest ----------- #
-    r_sum, f_sum = summarize_dims(real_dims), summarize_dims(fake_dims)
-    print("\n=== dimensions (is the label predictable WITHOUT looking?) ===")
-    print(f"  {'class':<6}{'n':>6}{'short edge min/med/max':>26}{'aspect min/med/max':>24}{'square':>8}")
-    for name, s in (("real", r_sum), ("ai", f_sum)):
-        edge = "{}/{}/{}".format(s["short_min"], s["short_med"], s["short_max"])
-        asp = "{}/{}/{}".format(s["aspect_min"], s["aspect_med"], s["aspect_max"])
-        print(f"  {name:<6}{s['n']:>6}{edge:>26}{asp:>24}{s['square_frac']:>8.0%}")
-
-    warnings = shortcut_warnings(r_sum, f_sum)
-    if warnings:
-        print("\n  ⚠ SHORTCUT RISK — these survive the overview downsample:")
-        for w in warnings:
-            print(f"    - {w}")
-        print("    Any of these lets the agent answer from the blurred overview without")
-        print("    investigating, which makes a high pass rate meaningless. Fix by")
-        print("    choosing better-matched sources, or filter with --aspect-range.")
-    else:
-        print("\n  no obvious shortcut: the two classes look alike in shape and size.")
+    report_dimensions(add_pass_frac(summarize_dims(real_dims), args.min_edge),
+                      add_pass_frac(summarize_dims(fake_dims), args.min_edge),
+                      args.min_edge)
 
     print(f"\nNext — confirm it empirically before training anything:")
     print(f"  VRR_DATASET={args.dataset} python tools/ceiling_probe.py "
