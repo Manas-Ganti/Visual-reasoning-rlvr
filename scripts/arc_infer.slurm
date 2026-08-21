@@ -55,6 +55,7 @@ case "$JOB" in
     python tools/ceiling_probe.py \
       --model "$MODEL" --backend vllm --tensor-parallel-size "$TP" \
       --condition "$CONDITION" --limit "${LIMIT:-200}" \
+      --overview-long-edge "$OVERVIEW_LONG_EDGE" \
       ${ADAPTER:+--adapter "$ADAPTER"} "$@"
     ;;
   groupvar)
@@ -64,12 +65,14 @@ case "$JOB" in
       ${ADAPTER:+--adapter "$ADAPTER"} \
       --images "${IMAGES:-32}" -G "${G:-8}" \
       --degradation "${DEGRADATION:-clean}" \
-      --max-inspects "${MAX_INSPECTS:-4}" "$@"
+      --max-inspects "${MAX_INSPECTS:-4}" \
+      --overview-long-edge "$OVERVIEW_LONG_EDGE" "$@"
     ;;
   distill)
     python data/build_sft_traces.py \
       --model "$MODEL" --backend vllm --tensor-parallel-size "$TP" \
-      --batch-episodes "$BATCH_EPISODES" ${LIMIT:+--limit "$LIMIT"} "$@"
+      --batch-episodes "$BATCH_EPISODES" ${LIMIT:+--limit "$LIMIT"} \
+      --overview-long-edge "$OVERVIEW_LONG_EDGE" "$@"
     ;;
   eval)
     python eval/harness.py \
@@ -79,11 +82,13 @@ case "$JOB" in
       --budgets "${BUDGETS:-2,4}" \
       --degradations "${DEGRADATIONS:-clean,jpeg,blur_downscale}" \
       ${LIMIT:+--limit "$LIMIT"} \
-      --trace-log "${TRACE_LOG:-logs/$VRR_DATASET/eval_episodes.jsonl}" "$@"
+      --trace-log "${TRACE_LOG:-logs/$VRR_DATASET/eval_episodes.jsonl}" \
+      --overview-long-edge "$OVERVIEW_LONG_EDGE" "$@"
     ;;
   evidence)
     arc_torchrun data/build_evidence_slice.py \
-      --model "$MODEL" --propose --limit "${LIMIT:-120}" --topk "${TOPK:-3}" "$@"
+      --model "$MODEL" --propose --limit "${LIMIT:-120}" --topk "${TOPK:-3}" \
+      --overview-long-edge "$OVERVIEW_LONG_EDGE" "$@"
     ;;
   *)
     echo "JOB must be one of: ceiling | floor | groupvar | distill | eval | evidence" >&2

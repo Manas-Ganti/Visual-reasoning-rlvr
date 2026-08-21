@@ -109,6 +109,13 @@ def main():
     ap.add_argument("--traces", default=None)
     ap.add_argument("--output-dir", default=None, help="Defaults to checkpoints/sft-<model>.")
     ap.add_argument("--max-inspects", type=int, default=4)
+    ap.add_argument("--overview-long-edge", type=int, default=140,
+                    help="Overview resolution — how much the low-res view is blurred. "
+                         "The zoom factor INSPECT buys is native_size/this, so ~native/7 "
+                         "is the target: 140 suits 1024px images, 70 suits 512px. Too high "
+                         "and the answer is readable from the overview; too low and the "
+                         "agent cannot tell where to look. Find it with "
+                         "tools/ceiling_probe.py --condition overview.")
     ap.add_argument("--epochs", type=float, default=2.0)
     ap.add_argument("--max-steps", type=int, default=-1)
     ap.add_argument("--learning-rate", type=float, default=1e-5)
@@ -144,7 +151,8 @@ def main():
                       args.dataset)
 
     env = InvestigationEnv(manifest_path=args.manifest, max_inspects=args.max_inspects,
-                           shuffle=False, dataset=args.dataset)
+                           shuffle=False, dataset=args.dataset,
+                           overview_long_edge=args.overview_long_edge)
     traces = load_traces(args.traces)
     conversations = [c for t in traces if (c := replay_to_conversation(env, t))]
     common.rank0_print(f"Loaded {len(traces)} traces; {len(conversations)} replayed cleanly.")

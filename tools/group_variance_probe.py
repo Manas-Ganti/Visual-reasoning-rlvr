@@ -120,6 +120,13 @@ def main():
     ap.add_argument("-G", "--num-generations", type=int, default=8,
                     help="Group size. Match your GRPO --num-generations.")
     ap.add_argument("--max-inspects", type=int, default=4)
+    ap.add_argument("--overview-long-edge", type=int, default=140,
+                    help="Overview resolution — how much the low-res view is blurred. "
+                         "The zoom factor INSPECT buys is native_size/this, so ~native/7 "
+                         "is the target: 140 suits 1024px images, 70 suits 512px. Too high "
+                         "and the answer is readable from the overview; too low and the "
+                         "agent cannot tell where to look. Find it with "
+                         "tools/ceiling_probe.py --condition overview.")
     ap.add_argument("--degradation", default="clean")
     ap.add_argument("--temperature", type=float, default=0.7,
                     help="Match your GRPO rollout temperature — variance depends on it.")
@@ -142,6 +149,7 @@ def main():
         return InvestigationEnv(
             manifest_path=args.manifest, max_inspects=args.max_inspects,
             reward_config=RewardConfig(), shuffle=False, dataset=args.dataset,
+            overview_long_edge=args.overview_long_edge,
         )
 
     probe = env_factory()

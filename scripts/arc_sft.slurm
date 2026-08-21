@@ -38,4 +38,5 @@ arc_torchrun training/sft.py \
   --per-device-batch-size "$PER_DEVICE_BS" \
   --grad-accum "$GRAD_ACCUM" \
   --wandb-project "$WANDB_PROJECT" \
+  --overview-long-edge "$OVERVIEW_LONG_EDGE" \
   "$@"

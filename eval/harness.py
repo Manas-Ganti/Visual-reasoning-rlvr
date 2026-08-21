@@ -247,6 +247,13 @@ def main():
                     help="Dataset namespace for manifest and episode logs.")
     ap.add_argument("--manifest", default=None)
     ap.add_argument("--budgets", default="4", help="Comma list of inspect budgets, e.g. 2,4")
+    ap.add_argument("--overview-long-edge", type=int, default=140,
+                    help="Overview resolution — how much the low-res view is blurred. "
+                         "The zoom factor INSPECT buys is native_size/this, so ~native/7 "
+                         "is the target: 140 suits 1024px images, 70 suits 512px. Too high "
+                         "and the answer is readable from the overview; too low and the "
+                         "agent cannot tell where to look. Find it with "
+                         "tools/ceiling_probe.py --condition overview.")
     ap.add_argument("--degradations", default="clean", help="Comma list of degradation levels.")
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--compare-base", action="store_true",
@@ -277,7 +284,8 @@ def main():
 
     # Test indices are shared across all configs (same env, re-created per budget).
     probe = InvestigationEnv(manifest_path=args.manifest, max_inspects=max(budgets),
-                             shuffle=False, dataset=args.dataset)
+                             shuffle=False, dataset=args.dataset,
+                             overview_long_edge=args.overview_long_edge)
     test_idx = [i for i, r in enumerate(probe.records) if r.get("split") == "test"]
     if args.limit:
         test_idx = test_idx[: args.limit]
@@ -303,6 +311,7 @@ def main():
         return lambda: InvestigationEnv(
             manifest_path=args.manifest, max_inspects=budget,
             reward_config=RewardConfig(), shuffle=False, dataset=args.dataset,
+            overview_long_edge=args.overview_long_edge,
         )
 
     policy_grid, base_grid = {}, {}

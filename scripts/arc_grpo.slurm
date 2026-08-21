@@ -53,4 +53,5 @@ arc_torchrun training/grpo.py \
   --num-generations "$NUM_GEN" \
   --degradation "$DEGRADATION" \
   --wandb-project "$WANDB_PROJECT" \
+  --overview-long-edge "$OVERVIEW_LONG_EDGE" \
   "$@"

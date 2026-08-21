@@ -21,6 +21,11 @@ export PROJECT_DIR="${PROJECT_DIR:-$SLURM_SUBMIT_DIR}"
 # logs, results) lives under <root>/<VRR_DATASET>/, so substrates never
 # overwrite each other. Override per submit: VRR_DATASET=faces sbatch ...
 export VRR_DATASET="${VRR_DATASET:-genimage}"
+# Overview resolution — the third difficulty axis, alongside degradation and
+# budget. INSPECT's zoom factor is native_size/this, so aim for ~native/7: 140
+# suits 1024px substrates, 70 suits 512px ones. Every launcher passes it, so
+# setting it here keeps a run's stages consistent with each other.
+export OVERVIEW_LONG_EDGE="${OVERVIEW_LONG_EDGE:-140}"
 # Model weights are tens to hundreds of GB — keep the HF cache on project/scratch
 # storage, never in $HOME (small quota, and it is not purged-but-fast storage).
 export HF_HOME="${HF_HOME:-/projects/$USER/hf_cache}"

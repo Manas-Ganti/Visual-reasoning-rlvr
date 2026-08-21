@@ -160,3 +160,69 @@ def test_get_trace_schema(manifest):
     assert trace["correct"] is True
     assert len(trace["turns"]) == 2
     assert set(["verdict_correct", "action_cost"]).issubset(trace["reward_breakdown"])
+
+
+# --------------------------------------------------------------------------- #
+# Overview resolution — the third difficulty axis
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def textured_manifest(tmp_path):
+    """The main fixture paints flat colour, which blur cannot degrade. These
+    tests need actual high-frequency content to measure the loss of."""
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    rows = []
+    for i, label in enumerate((1, 0)):
+        noise = rng.integers(0, 256, size=(600, 600, 3), dtype=np.uint8)
+        p = tmp_path / f"tex_{i}.png"
+        Image.fromarray(noise).save(p)
+        rows.append({"id": f"t{i}", "file_name": str(p), "label": label, "split": "test"})
+    mpath = tmp_path / "textured.jsonl"
+    mpath.write_text("\n".join(json.dumps(r) for r in rows))
+    return str(mpath)
+
+
+def _overview_detail(manifest, long_edge):
+    """Variance of the overview a policy actually receives. Blur destroys
+    high-frequency content, so a blurrier overview has strictly less of it."""
+    import numpy as np
+
+    env = _env(manifest, overview_long_edge=long_edge)
+    obs, _ = env.reset(options={"index": 0, "degradation": "clean"})
+    arr = np.asarray(obs["images"][0].convert("L"), dtype=float)
+    return float(np.var(np.diff(arr, axis=1)))
+
+
+def test_lower_overview_long_edge_destroys_more_detail(textured_manifest):
+    """The flag must change what the agent sees, or it is a knob wired to
+    nothing — the whole point is trading overview legibility for INSPECT's
+    zoom factor."""
+    blurry = _overview_detail(textured_manifest, 70)
+    sharper = _overview_detail(textured_manifest, 140)
+    assert blurry < sharper, f"70 -> {blurry:.2f} should be below 140 -> {sharper:.2f}"
+
+
+def test_overview_long_edge_is_recorded_on_the_env(manifest):
+    env = _env(manifest, overview_long_edge=70)
+    assert env.overview_long_edge == 70
+
+
+def test_overview_default_is_unchanged(manifest):
+    """140 is the documented default; changing it silently would move every
+    published pass rate."""
+    assert _env(manifest).overview_long_edge == 140
+
+
+def test_inspect_reveal_is_unaffected_by_overview_setting(textured_manifest):
+    """Blurring the overview must not touch the reveal — INSPECT's payoff comes
+    from the *gap* between them, so the reveal has to stay at native detail."""
+    import numpy as np
+
+    crops = []
+    for edge in (70, 140):
+        env = _env(textured_manifest, overview_long_edge=edge, max_inspects=4)
+        env.reset(options={"index": 0, "degradation": "clean"})
+        obs, *_ = env.step("OBSERVATION: x\nREASONING: y\nHYPOTHESIS: z\nACTION: INSPECT 6")
+        crops.append(np.asarray(obs["images"][-1].convert("L"), dtype=float))
+    assert np.array_equal(crops[0], crops[1])

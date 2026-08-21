@@ -175,6 +175,13 @@ def main():
     ap.add_argument("--manifest", default=None)
     ap.add_argument("--output-dir", default=None, help="Defaults to checkpoints/grpo-<model>.")
     ap.add_argument("--max-inspects", type=int, default=4)
+    ap.add_argument("--overview-long-edge", type=int, default=140,
+                    help="Overview resolution — how much the low-res view is blurred. "
+                         "The zoom factor INSPECT buys is native_size/this, so ~native/7 "
+                         "is the target: 140 suits 1024px images, 70 suits 512px. Too high "
+                         "and the answer is readable from the overview; too low and the "
+                         "agent cannot tell where to look. Find it with "
+                         "tools/ceiling_probe.py --condition overview.")
     ap.add_argument("--degradation", default="clean")
     ap.add_argument("--num-generations", type=int, default=8, help="GRPO group size G.")
     ap.add_argument("--learning-rate", type=float, default=1e-6)
@@ -219,6 +226,7 @@ def main():
         manifest_path=args.manifest, max_inspects=args.max_inspects,
         reward_config=RewardConfig(), shuffle=False, default_degradation=args.degradation,
         seed=args.seed + dist.rank, dataset=args.dataset,
+        overview_long_edge=args.overview_long_edge,
     )
     max_turns = args.max_inspects + 3
     train_idx = [i for i, r in enumerate(env.records) if r.get("split", "train") == "train"]
