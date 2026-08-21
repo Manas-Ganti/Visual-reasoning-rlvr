@@ -112,21 +112,41 @@ GDOWN=""
 # `command -v`. Fall back to the module form, which always works if the package
 # is importable by the active python.
 resolve_gdown() {
-  if command -v gdown >/dev/null 2>&1; then
-    GDOWN="gdown"
-  elif [ -x "$HOME/.local/bin/gdown" ]; then
-    GDOWN="$HOME/.local/bin/gdown"
-  elif python -m gdown --version >/dev/null 2>&1; then
-    GDOWN="python -m gdown"
-  elif python3 -m gdown --version >/dev/null 2>&1; then
-    GDOWN="python3 -m gdown"
-  else
-    die "gdown not found. Install it:  pip install --user --upgrade gdown
-       If it IS installed, ~/.local/bin is probably off your PATH:
-         export PATH=\"\$HOME/.local/bin:\$PATH\"
-       or activate the conda env you installed it into (conda activate vrr)."
+  # Explicit override wins: GDOWN="/path/to/gdown" or GDOWN="python3.11 -m gdown"
+  if [ -n "${GDOWN:-}" ]; then
+    say "gdown       : $GDOWN (from \$GDOWN)"
+    return 0
   fi
-  say "gdown       : $GDOWN"
+  local cand
+  for cand in "gdown" "$HOME/.local/bin/gdown" "python -m gdown" "python3 -m gdown" \
+              "$(command -v python3 || echo python3) -m gdown"; do
+    if $cand --version >/dev/null 2>&1; then
+      GDOWN="$cand"
+      say "gdown       : $GDOWN"
+      return 0
+    fi
+  done
+
+  # Nothing worked. Print what we actually inspected — "not found" alone sends
+  # people to reinstall a gdown that is already installed, when the real cause
+  # is almost always a python/PATH mismatch (pip --user installs into
+  # ~/.local/lib/pythonX.Y, which a DIFFERENT python cannot import).
+  printf '\n[fetch] gdown could not be resolved. Diagnostics:\n' >&2
+  printf '  PATH                : %s\n' "$PATH" >&2
+  printf '  which python        : %s (%s)\n' \
+    "$(command -v python || echo none)" "$(python -V 2>&1 || true)" >&2
+  printf '  which python3       : %s (%s)\n' \
+    "$(command -v python3 || echo none)" "$(python3 -V 2>&1 || true)" >&2
+  printf '  ~/.local/bin/gdown  : %s\n' \
+    "$([ -e "$HOME/.local/bin/gdown" ] && ls -l "$HOME/.local/bin/gdown" || echo missing)" >&2
+  printf '  CONDA_DEFAULT_ENV   : %s\n' "${CONDA_DEFAULT_ENV:-none}" >&2
+  printf '  import gdown        : %s\n' \
+    "$(python -c 'import gdown;print(gdown.__version__)' 2>&1 | tail -1)" >&2
+  die "Fix, in order of likelihood:
+       1. Install into the env you actually run:   conda activate vrr && pip install --upgrade gdown
+       2. Put the user bin on PATH:                export PATH=\"\$HOME/.local/bin:\$PATH\"
+       3. Point at it explicitly:                  GDOWN=\"/full/path/to/gdown\" bash \$0
+       4. Skip gdown entirely:                     METHOD=rclone RCLONE_REMOTE=gdrive bash \$0"
 }
 
 require_tool() {
