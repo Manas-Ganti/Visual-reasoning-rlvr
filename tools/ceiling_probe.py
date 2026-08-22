@@ -122,19 +122,35 @@ def report_ranking(scores: list[float], labels: list[int], uncovered: int) -> No
     mean = lambda xs: sum(xs) / len(xs) if xs else float("nan")
     print(f"  mean P(AI): on AI images {mean(pos):.3f} | on REAL images {mean(neg):.3f}")
 
-    print("  threshold sweep (accuracy if we called AI above the threshold):")
-    best = None
-    for thr in [round(0.05 * i, 2) for i in range(1, 20)]:
+    # Sweep the OBSERVED scores, not a fixed grid. When a model is reluctant the
+    # separation collapses into a narrow band near zero (here: AI mean 0.249 vs
+    # REAL mean 0.034, most of both under 0.05), and a linear 0.05 grid steps
+    # straight over the operating point — reporting a "best accuracy" far below
+    # what the ranking actually supports.
+    cand = sorted(set(scores))
+    cand = [0.0] + [(a + b) / 2 for a, b in zip(cand, cand[1:])] + [1.0]
+    n_pos, n_neg = sum(labels), n - sum(labels)
+    swept = []
+    for thr in cand:
         tp = sum(1 for s, l in zip(scores, labels) if l == 1 and s >= thr)
         tn = sum(1 for s, l in zip(scores, labels) if l == 0 and s < thr)
-        acc = (tp + tn) / n
-        best = max(best or (acc, thr), (acc, thr))
-        if abs(thr * 100) % 10 == 0:
-            print(f"    thr={thr:.2f}  acc={acc:.3f}  "
-                  f"AI recall={tp / max(sum(labels), 1):.3f}  "
-                  f"REAL recall={tn / max(n - sum(labels), 1):.3f}")
-    print(f"  best achievable accuracy {best[0]:.3f} at threshold {best[1]:.2f} — "
-          f"the ceiling this substrate offers once the answer is calibrated")
+        swept.append(((tp + tn) / n, thr, tp, tn))
+    best_acc, best_thr, best_tp, best_tn = max(swept)
+
+    qs = sorted(scores)
+    pct = lambda q: qs[min(len(qs) - 1, int(q * len(qs)))]
+    print(f"  score percentiles: p10={pct(.10):.4f} p50={pct(.50):.4f} "
+          f"p90={pct(.90):.4f} max={qs[-1]:.4f}")
+    print("  threshold sweep (accuracy if we called AI at or above the threshold):")
+    for frac in (0.1, 0.25, 0.5, 0.75, 0.9):
+        acc, thr, tp, tn = swept[min(len(swept) - 1, int(frac * len(swept)))]
+        print(f"    thr={thr:.4f}  acc={acc:.3f}  "
+              f"AI recall={tp / max(n_pos, 1):.3f}  REAL recall={tn / max(n_neg, 1):.3f}")
+    print(f"  BEST accuracy {best_acc:.3f} at threshold {best_thr:.4f} "
+          f"(AI recall {best_tp / max(n_pos, 1):.3f}, "
+          f"REAL recall {best_tn / max(n_neg, 1):.3f})")
+    print("  ^ what this substrate offers once the decision is calibrated; compare "
+          "this to the 0.85 gate, NOT the raw accuracy above.")
 
 
 def main():
