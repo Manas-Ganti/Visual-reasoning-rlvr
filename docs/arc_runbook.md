@@ -25,7 +25,15 @@ sbatch --account=ece-6474-spring2026 --partition=h200_normal_q --qos=tc_h200_nor
 ```
 
 `JOB=floor` for the other half of Gate 1. Every flag on that line is load-bearing;
-the sections below say why.
+the sections below say why. **This line is confirmed working** — it ran the first
+successful ceiling probe on `tc-xe003`.
+
+If your terminal mangles multi-line pastes (see *Terminal paste corruption*
+below), use the one-line form, which has nothing for bracketed paste to break:
+
+```bash
+HF_HOME=/home/manasganti/hf_cache CONDA_ENV=/home/manasganti/miniconda3/envs/vrr OVERVIEW_LONG_EDGE=64 VRR_DATASET=genwukong JOB=ceiling TP=1 sbatch --account=ece-6474-spring2026 --partition=h200_normal_q --qos=tc_h200_normal_short --gres=gpu:h200:1 --cpus-per-task=8 --mem=96G --time=00:30:00 --mail-user=manasganti@vt.edu scripts/arc_infer.slurm
+```
 
 ---
 
@@ -101,7 +109,12 @@ a declarative constraint, not a runtime break, and the gate path never imports
   Pinned back to `0.36.2`. **Constrain the leaf package, don't bump transformers**
   — that would fight vLLM's pin.
 
-### Activation: the silent failure (commit `cef7d8f`)
+### Activation: the silent failure (commits `cef7d8f`, `c7b1665`)
+
+> **In hindsight this was not the bug** — the real cause was the zero-byte
+> interpreter in the next section. Both commits are still worth keeping (they
+> turn a silent fall-through into a loud abort), but do not let this section
+> send you down the same path: run `python -V` *first*.
 
 `arc_env.sh` runs `module reset` + `module load Miniforge3`, which swaps in the
 **cluster's** conda. That conda cannot see a personal `~/miniconda3` root, so:
@@ -123,6 +136,10 @@ imports, aborting with a readable message otherwise.
 ```
 [arc_env] python=/home/manasganti/miniconda3/envs/vrr/bin/python
 ```
+
+`c7b1665` went further: `arc_env.sh` exports `PY="$CONDA_ENV/bin/python"` and all
+four invocations in `arc_infer.slurm` call `"$PY"` rather than a bare `python`.
+Nothing resolves through `PATH` any more.
 
 ### A zero-byte interpreter (the expensive one)
 
@@ -150,22 +167,66 @@ find /home/manasganti/miniconda3/envs/vrr/bin -type f -size 0
 find /home/manasganti/miniconda3/envs/vrr/lib -name "*.so*" -size 0 | head
 ```
 
-Repair by pinning the existing build so the torch/vLLM pairing is not reshuffled,
-then re-verify the imports:
+**What actually fixed it.** Only that one file was damaged — no zero-byte `.so`s,
+and `vrr-train` was untouched. Conda's package cache still held an intact copy
+(they were *not* hardlinked: cache 25,548,416 bytes, env 0), so restoring the
+byte-identical build was a straight copy, with no dependency solve and no risk to
+the torch/vLLM pairing:
 
 ```bash
-conda list -p /home/manasganti/miniconda3/envs/vrr python
-conda install -p /home/manasganti/miniconda3/envs/vrr --force-reinstall "python=3.11.<x>"
+ls -la /home/manasganti/miniconda3/pkgs/python-3.11*/bin/python3.11   # confirm non-zero
+cp -p /home/manasganti/miniconda3/pkgs/python-3.11.15-h17756b0_1/bin/python3.11 \
+      /home/manasganti/miniconda3/envs/vrr/bin/python3.11
+/home/manasganti/miniconda3/envs/vrr/bin/python -V                    # Python 3.11.15
 ```
 
-It was **not** a quota problem (334 of 640 GB used). Conda hardlinks env files
-from `~/miniconda3/pkgs/`, so a truncated package-cache copy empties the env copy
-with it — `conda clean --packages` if the reinstall misbehaves.
+Then re-verify the stack, because a broken interpreter can mask other damage:
+
+```bash
+/home/manasganti/miniconda3/envs/vrr/bin/python -c "import torch, vllm, PIL, transformers; print(torch.__version__, torch.version.cuda, vllm.__version__)"
+# 2.6.0+cu124 12.4 0.8.5
+```
+
+If the cache copy is *also* 0 bytes they share an inode; fall back to
+`conda install -p <env> --force-reinstall "python=3.11.15"` and re-check the
+imports afterwards, since a forced reinstall can reshuffle dependencies.
+
+**Cause: still unknown.** It was **not** quota (334 of 640 GB used). Permissions
+and the symlinks were intact; only the file contents vanished. The mtime was
+`Aug 22 18:15`, the same minute job 7239565 ran — but nothing in `arc_env.sh` or
+`arc_infer.slurm` writes to that path. If a binary is ever silently truncated
+again, that is an ARC `/home` support ticket, not something to debug locally.
 
 **Rule: if a job completes in seconds with an empty `.err`, check that the
 interpreter is a real binary before debugging anything else.** Hours went into
 the launcher scripts, PATH ordering, heredocs and `sitecustomize` before anyone
 ran `python -V`.
+
+### Terminal paste corruption
+
+The VS Code remote terminal leaks bracketed-paste markers, which silently
+corrupts commands: a stray `~` appended to a filename (`manifest.jsonl~`), a
+literal `[200~` prefix, assignments that never take effect, and heredocs that
+swallow the next command. This cost several rounds of chasing failures that were
+paste damage rather than real.
+
+Two specific traps seen here:
+
+* a mangled `V=...` assignment meant `$V` was empty, so `env FOO=1 $V -c ...` ran
+  `env` with no command — which prints the whole environment and exits 0, and
+  looks nothing like the failure you were testing for;
+* pasting previous *output* back into the prompt produces a cascade of
+  `command not found` and `syntax error` lines that mask the real result.
+
+Fix it once per shell:
+
+```bash
+bind 'set enable-bracketed-paste off'
+```
+
+Otherwise: one command per line, prefer single-line commands over backslash
+continuations, and write anything long to a file (`cat > /tmp/sub.sh <<'EOF'`)
+and run that instead.
 
 ### HF cache
 
@@ -265,7 +326,11 @@ gate numbers are lost if that log is lost. **Open item: persist them.**
 
 ## Open items
 
-- [ ] `data/genwukong/manifest.jsonl` existence and class balance — never verified
+- [x] `data/genwukong/manifest.jsonl` — verified: 800 rows, 50/50 balanced
+      (`train` 320+320, `val` 40+40, `test` 40+40). Note the probe's
+      `--limit 200` default is moot: `test` holds only 80 images, so accuracy
+      carries roughly ±8pp at 95% confidence. A reading near the 0.85 gate is
+      not decisive — re-run against `--split val` for a second independent 80.
 - [ ] Gate results to `results/$VRR_DATASET/gate_*.json` + optional `wandb.init`
 - [ ] `arc_env.sh` could probe for a usable `HF_HOME` the way
       `scripts/fetch_genimage.sh:72` probes for data storage
