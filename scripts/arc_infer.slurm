@@ -57,14 +57,14 @@ case "$JOB" in
     # Same probe, two conditions. The gap between them is the only room the
     # investigation has to work in, so both numbers are needed to read either.
     if [ "$JOB" = "ceiling" ]; then CONDITION=full; else CONDITION=overview; fi
-    python tools/ceiling_probe.py \
+    "$PY" tools/ceiling_probe.py \
       --model "$MODEL" --backend vllm --tensor-parallel-size "$TP" \
       --condition "$CONDITION" --limit "${LIMIT:-200}" \
       --overview-long-edge "$OVERVIEW_LONG_EDGE" \
       ${ADAPTER:+--adapter "$ADAPTER"} "$@"
     ;;
   groupvar)
-    python tools/group_variance_probe.py \
+    "$PY" tools/group_variance_probe.py \
       --model "$MODEL" --backend vllm --tensor-parallel-size "$TP" \
       --batch-episodes "$BATCH_EPISODES" \
       ${ADAPTER:+--adapter "$ADAPTER"} \
@@ -74,13 +74,13 @@ case "$JOB" in
       --overview-long-edge "$OVERVIEW_LONG_EDGE" "$@"
     ;;
   distill)
-    python data/build_sft_traces.py \
+    "$PY" data/build_sft_traces.py \
       --model "$MODEL" --backend vllm --tensor-parallel-size "$TP" \
       --batch-episodes "$BATCH_EPISODES" ${LIMIT:+--limit "$LIMIT"} \
       --overview-long-edge "$OVERVIEW_LONG_EDGE" "$@"
     ;;
   eval)
-    python eval/harness.py \
+    "$PY" eval/harness.py \
       --model "$MODEL" --backend vllm --tensor-parallel-size "$TP" \
       --batch-episodes "$BATCH_EPISODES" \
       ${ADAPTER:+--adapter "$ADAPTER"} ${ADAPTER:+--compare-base} \
