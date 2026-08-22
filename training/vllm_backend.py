@@ -115,6 +115,40 @@ class VLLMPolicy:
             for o in outputs
         ]
 
+    def first_token_logprobs(
+        self, obs_list: list[dict], *, top_k: int = 20
+    ) -> list[dict[str, float]]:
+        """Top-``top_k`` logprobs of the FIRST generated token, as {token: logprob}.
+
+        The sampled one-word answer hides the thing a gate most needs to know: a
+        model can rank the AI images above the real ones and still never cross its
+        own threshold for actually saying "AI". Accuracy then reports the prior,
+        not the discriminative power. These logprobs let the caller score the
+        ranking directly (AUC) instead of the argmax.
+
+        Offline scoring only — this is not the GRPO logprob path, which must go
+        through HF ``generate`` for the gradient.
+        """
+        from vllm import SamplingParams
+
+        params = SamplingParams(temperature=0.0, max_tokens=1, logprobs=top_k)
+        prompts = [self._to_prompt(obs) for obs in obs_list]
+        outputs = self.llm.generate(prompts, params, lora_request=self.lora_request)
+
+        scored: list[dict[str, float]] = []
+        for o in outputs:
+            steps = o.outputs[0].logprobs or []
+            row: dict[str, float] = {}
+            if steps:
+                for tid, info in steps[0].items():
+                    tok = getattr(info, "decoded_token", None)
+                    if tok is None:
+                        tok = self.processor.tokenizer.decode([tid])
+                    # Keep the highest logprob when two ids decode to the same text.
+                    row[tok] = max(float(info.logprob), row.get(tok, float("-inf")))
+            scored.append(row)
+        return scored
+
     # ------------------------------------------------------------------ #
     # Internals
     # ------------------------------------------------------------------ #

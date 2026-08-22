@@ -7,6 +7,9 @@
 #   # Short and small — override the 8-GPU/8h defaults so they queue fast.
 #   JOB=ceiling sbatch --gres=gpu:2 --time=00:30:00 scripts/arc_infer.slurm
 #   JOB=floor   sbatch --gres=gpu:2 --time=00:30:00 scripts/arc_infer.slurm
+#   # A failing ceiling is ambiguous: no signal, or signal the model won't commit
+#   # to? AUC=1 scores the ranking instead of the sampled word and tells them apart.
+#   JOB=ceiling AUC=1 sbatch --gres=gpu:1 --time=00:30:00 scripts/arc_infer.slurm
 #   JOB=groupvar ADAPTER=checkpoints/genimage/sft-qwen2.5-vl-32b \
 #     sbatch --gres=gpu:4 --time=02:00:00 scripts/arc_infer.slurm
 #
@@ -61,6 +64,7 @@ case "$JOB" in
       --model "$MODEL" --backend vllm --tensor-parallel-size "$TP" \
       --condition "$CONDITION" --limit "${LIMIT:-200}" \
       --overview-long-edge "$OVERVIEW_LONG_EDGE" \
+      ${AUC:+--auc} \
       ${ADAPTER:+--adapter "$ADAPTER"} "$@"
     ;;
   groupvar)
