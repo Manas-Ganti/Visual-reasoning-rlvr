@@ -124,6 +124,49 @@ imports, aborting with a readable message otherwise.
 [arc_env] python=/home/manasganti/miniconda3/envs/vrr/bin/python
 ```
 
+### A zero-byte interpreter (the expensive one)
+
+Symptom: **every** `python` invocation prints nothing and exits 0. A GPU job
+"succeeds" in 2 seconds with `State=COMPLETED ExitCode=0:0`, an empty `.err`,
+and a `.out` holding only the shell `echo`s. `type -a python` looks correct.
+`[ -x ... ]` passes. Nothing errors anywhere.
+
+Cause: `envs/vrr/bin/python3.11` was a **0-byte file** (`file` reports `empty`);
+`python`, `python3`, `python3.1` all symlink to it. `execve` on an empty file
+returns `ENOEXEC`, so bash runs it as a shell script — an empty script, which
+does nothing and exits 0, whatever arguments you pass.
+
+Diagnose in one line — a real CPython can never fail this:
+
+```bash
+/home/manasganti/miniconda3/envs/vrr/bin/python -V; echo "exit=$?"
+```
+
+No output means the binary is broken, **not** that stdout is being swallowed.
+Then check the extent:
+
+```bash
+find /home/manasganti/miniconda3/envs/vrr/bin -type f -size 0
+find /home/manasganti/miniconda3/envs/vrr/lib -name "*.so*" -size 0 | head
+```
+
+Repair by pinning the existing build so the torch/vLLM pairing is not reshuffled,
+then re-verify the imports:
+
+```bash
+conda list -p /home/manasganti/miniconda3/envs/vrr python
+conda install -p /home/manasganti/miniconda3/envs/vrr --force-reinstall "python=3.11.<x>"
+```
+
+It was **not** a quota problem (334 of 640 GB used). Conda hardlinks env files
+from `~/miniconda3/pkgs/`, so a truncated package-cache copy empties the env copy
+with it — `conda clean --packages` if the reinstall misbehaves.
+
+**Rule: if a job completes in seconds with an empty `.err`, check that the
+interpreter is a real binary before debugging anything else.** Hours went into
+the launcher scripts, PATH ordering, heredocs and `sitecustomize` before anyone
+ran `python -V`.
+
 ### HF cache
 
 `HF_HOME=/home/manasganti/hf_cache` (Qwen2.5-VL-32B present: 68.3 GB, 32 files).
