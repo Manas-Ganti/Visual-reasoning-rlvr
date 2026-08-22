@@ -80,9 +80,47 @@ echo "[arc_env] wandb mode=${WANDB_MODE} project=${WANDB_PROJECT} dir=${WANDB_DI
 # ARC uses Lmod. Adjust the module names to what `module spider cuda` reports on
 # the cluster you land on; the conda env is expected to hold the requirements.txt
 # TRAINING profile (torch built against this CUDA).
+#
+# `module reset` swaps in the CLUSTER's conda, which cannot see a personal
+# ~/miniconda3 root — so a bare env NAME that activates fine on the login node
+# resolves to nothing inside the job. Give CONDA_ENV an ABSOLUTE PATH:
+#
+#     CONDA_ENV=/home/$USER/miniconda3/envs/vrr sbatch scripts/arc_infer.slurm
+#
 module reset >/dev/null 2>&1 || true
 module load Miniforge3 >/dev/null 2>&1 || module load Anaconda3 >/dev/null 2>&1 || true
-source activate "${CONDA_ENV:-vrr}" 2>/dev/null || conda activate "${CONDA_ENV:-vrr}"
+
+export CONDA_ENV="${CONDA_ENV:-vrr}"
+if [ -x "$CONDA_ENV/bin/python" ]; then
+  # Absolute path: put it on PATH directly. `source activate` can report success
+  # in a non-interactive batch shell WITHOUT switching interpreters, so the ||
+  # fallback never fires and the job runs in `base` — which surfaces much later
+  # as a bare ModuleNotFoundError, after the GPU allocation is already spent.
+  export CONDA_PREFIX="$CONDA_ENV"
+  export PATH="$CONDA_ENV/bin:$PATH"
+else
+  eval "$(conda shell.bash hook 2>/dev/null)" || true
+  conda activate "$CONDA_ENV" || {
+    echo "[arc_env] FATAL: cannot activate conda env '$CONDA_ENV'." >&2
+    echo "[arc_env]        Pass an absolute path: CONDA_ENV=/path/to/envs/vrr sbatch ..." >&2
+    return 1 2>/dev/null || exit 1
+  }
+fi
+
+# Verify rather than assume. This is the cheapest check in the pipeline and it
+# guards the most expensive resource.
+python - <<'PYCHECK' || return 1 2>/dev/null || exit 1
+import os, sys
+env = os.environ.get("CONDA_ENV", "")
+print(f"[arc_env] python={sys.executable}")
+if os.path.isabs(env) and not sys.executable.startswith(os.path.realpath(env)) \
+   and not sys.executable.startswith(env):
+    sys.exit(f"[arc_env] FATAL: interpreter is not inside {env} — activation fell through.")
+try:
+    import PIL  # noqa: F401  (cheap proxy for "requirements are installed here")
+except ImportError as e:
+    sys.exit(f"[arc_env] FATAL: {e} in {sys.executable} — wrong env, or deps not installed.")
+PYCHECK
 
 cd "$PROJECT_DIR"
 
