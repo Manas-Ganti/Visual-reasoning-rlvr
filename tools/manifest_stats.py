@@ -109,31 +109,52 @@ def main() -> None:
     summarise("REAL", stats[0])
     summarise("AI  ", stats[1])
 
-    scores = [r["bpp"] for r in stats[0]] + [r["bpp"] for r in stats[1]]
+    if not (stats[0] and stats[1]):
+        return
     labels = [0] * len(stats[0]) + [1] * len(stats[1])
-    if stats[0] and stats[1]:
-        a = auc(scores, labels)
-        # Direction-free: a confound that runs the other way is just as damaging.
-        strength = max(a, 1 - a)
-        print(f"\nbytes/px as a standalone label predictor: AUC={a:.3f} "
-              f"(strength {strength:.3f}, 0.5 = no leak)")
-        if strength >= 0.80:
-            print("  VERDICT: the label is largely readable from file size alone. Any "
-                  "floor above chance is explained by this, not by the picture. "
-                  "Re-encode both classes identically before trusting the gates.")
-        elif strength >= 0.65:
-            print("  VERDICT: a real encoding leak. Worth equalising, though it may "
-                  "not account for the whole floor on its own.")
-        else:
-            print("  VERDICT: encoding does not carry the label. A high floor is "
-                  "coming from the image content, not the container.")
+    rows_all = stats[0] + stats[1]
 
-        dims = {lab: collections.Counter((r["w"], r["h"]) for r in stats[lab])
-                for lab in (0, 1)}
-        if dims[0].most_common(1) != dims[1].most_common(1):
-            print(f"  NOTE: most common dimensions differ — "
-                  f"REAL {dims[0].most_common(1)[0]} vs AI {dims[1].most_common(1)[0]}. "
-                  f"Resolution alone can carry the label.")
+    # Each of these is a scalar the model can perceive WITHOUT looking at content.
+    # Geometry matters most: env/grid.make_overview scales width and height by the
+    # same factor and restores uniformly, so aspect ratio and relative size reach
+    # the policy through the overview completely untouched. An encoding leak at
+    # least dies when the pixels are resampled; a geometry leak never does.
+    features = {
+        "bytes/px      ": [r["bpp"] for r in rows_all],
+        "aspect (w/h)  ": [r["w"] / max(r["h"], 1) for r in rows_all],
+        "long edge     ": [max(r["w"], r["h"]) for r in rows_all],
+        "area (px)     ": [r["w"] * r["h"] for r in rows_all],
+    }
+    print("\nstandalone label predictors — no model, no content, just the file:")
+    worst = ("", 0.5)
+    for name, vals in features.items():
+        a = auc(vals, labels)
+        # Direction-free: a confound running the other way is just as damaging.
+        strength = max(a, 1 - a)
+        flag = "  <-- LEAK" if strength >= 0.65 else ""
+        print(f"  {name} AUC={a:.3f}  strength={strength:.3f}{flag}")
+        if strength > worst[1]:
+            worst = (name.strip(), strength)
+
+    for lab, tag in ((0, "REAL"), (1, "AI  ")):
+        v = stats[lab]
+        sq = sum(1 for r in v if r["w"] == r["h"]) / len(v)
+        top, cnt = collections.Counter((r["w"], r["h"]) for r in v).most_common(1)[0]
+        print(f"  {tag}: {sq:.0%} square, modal size {top} at {cnt}/{len(v)}")
+
+    print(f"\nstrongest shortcut: {worst[0]} at strength {worst[1]:.3f}")
+    if worst[1] >= 0.80:
+        print("  VERDICT: the label is largely readable from the file alone. No gate "
+              "number means anything until this is equalised — a policy can score "
+              "well without ever looking at the picture.")
+    elif worst[1] >= 0.65:
+        print("  VERDICT: a real shortcut. If it is geometric it survives the overview "
+              "intact and explains a floor above chance; fix it by SELECTION "
+              "(build_manifest_hf --aspect-range / --min-edge) so the two classes "
+              "match in shape and size.")
+    else:
+        print("  VERDICT: no strong shortcut in the container. A high floor is coming "
+              "from image content — the honest fix is a different generator.")
 
 
 if __name__ == "__main__":
