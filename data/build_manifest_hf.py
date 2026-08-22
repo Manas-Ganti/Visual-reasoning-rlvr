@@ -18,9 +18,23 @@ being measured.
 
 WHAT THIS DELIBERATELY DOES NOT DO
 ----------------------------------
-It never crops, resizes, or re-encodes lossily. Images are written exactly as
-decoded, PNG by default. The only levers are *selection* (``--min-edge``,
-``--aspect-range``) — pick different images, never alter them.
+It never RESIZES or re-encodes lossily. Resampling invents frequency content the
+source never had, and since the two classes would be resampled from different
+starting sizes, it manufactures exactly the kind of shortcut this build exists to
+avoid. Images are written as decoded, PNG by default.
+
+``--center-crop N`` is the one exception, and it is a different operation:
+cropping *selects* pixels and invents nothing, so the artifacts the task depends
+on survive untouched while every image ends up N x N. Use it when the two classes
+cannot be matched by selection alone — on GenImage the generated half is uniformly
+512x512 while the real half is varied and slightly smaller, which makes AREA a
+0.85-AUC predictor of the label all by itself (check with
+``tools/manifest_stats.py``). Size sails through the overview downsample intact,
+and Qwen bins images to a patch grid, so different sizes even reach the model as
+different token counts. Cropping both classes to a common N deletes that channel.
+
+The other levers are *selection* (``--min-edge``, ``--aspect-range``) — pick
+different images, never alter them.
 
 That matters because the failure mode here is a shortcut, not a lack of signal:
 if every fake is a 1024x1024 square and every real is a 500x375 rectangle, aspect
@@ -67,8 +81,16 @@ def pick_image_column(ds, override: str | None) -> str:
     )
 
 
+def center_crop_to(img, n: int):
+    """Center-crop to ``n`` x ``n``. Selects pixels; resamples nothing."""
+    w, h = img.size
+    left, top = (w - n) // 2, (h - n) // 2
+    return img.crop((left, top, left + n, top + n))
+
+
 def stream_class(repo, split, config, image_col, want, min_edge, aspect_range,
-                 out_dir, prefix, fmt, survey=False, label_col=None, keep_label=None):
+                 out_dir, prefix, fmt, survey=False, label_col=None, keep_label=None,
+                 center_crop=None):
     """Stream ``repo`` and save the first ``want`` images that pass the filters.
 
     Returns (paths, dims, rejected) where dims is a list of (w, h). Stops reading
@@ -140,6 +162,14 @@ def stream_class(repo, split, config, image_col, want, min_edge, aspect_range,
                 rejected["aspect"] += 1
                 continue
 
+        if center_crop:
+            if min(w, h) < center_crop:
+                rejected["too_small_for_crop"] += 1
+                continue
+            img = center_crop_to(img, center_crop)
+            w, h = img.size          # record what is WRITTEN, so the shortcut
+                                     # report describes the images the model sees
+
         name = f"{prefix}_{len(paths):06d}.{fmt}"
         path = os.path.join(out_dir, name)
         # Lossless by default: whatever the source encoder did is preserved in
@@ -167,6 +197,9 @@ def stream_class(repo, split, config, image_col, want, min_edge, aspect_range,
         if rejected.get("too_small"):
             print(f"    {rejected['too_small']} were under --min-edge {min_edge}. "
                   f"Run with --survey to see what sizes this repo actually holds.")
+        if rejected.get("too_small_for_crop"):
+            print(f"    {rejected['too_small_for_crop']} were under --center-crop "
+                  f"{center_crop}. Lower it, or raise --min-edge to match.")
     return paths, dims, rejected
 
 
@@ -403,6 +436,13 @@ def main():
                     help="Keep only images with LO<=w/h<=HI, e.g. 0.9,1.1. A filter, "
                          "not a transform: it selects matching images rather than "
                          "cropping anything. Use when the shortcut warnings fire.")
+    ap.add_argument("--center-crop", type=int, default=None,
+                    help="Center-crop every kept image to N x N, both classes alike. "
+                         "The one transform this build allows: it selects pixels and "
+                         "resamples nothing, so artifacts survive while AREA, LONG EDGE "
+                         "and ASPECT stop predicting the label. Needs N <= --min-edge. "
+                         "Verify with tools/manifest_stats.py — every predictor should "
+                         "fall to ~0.5.")
     ap.add_argument("--format", choices=["png", "jpg"], default="png",
                     help="png (default) is lossless. jpg is ~8x smaller and, applied "
                          "identically to both classes, also flattens any difference "
@@ -431,6 +471,12 @@ def main():
     ap.add_argument("--survey-n", type=int, default=200,
                     help="Images sampled per class in --survey mode.")
     args = ap.parse_args()
+
+    if args.center_crop and args.center_crop > args.min_edge:
+        raise SystemExit(
+            f"--center-crop {args.center_crop} exceeds --min-edge {args.min_edge}: "
+            f"every image would be rejected as too small to crop. Raise --min-edge "
+            f"to at least {args.center_crop}, or lower the crop.")
 
     def _coerce(v):
         try:
@@ -480,7 +526,8 @@ def main():
             args.real, args.real_split, args.real_config, args.image_column,
             want, args.min_edge, aspect_range,
             os.path.join(img_root, "real"), "real", fmt, survey=args.survey,
-            label_col=label_col, keep_label=real_label)
+            label_col=label_col, keep_label=real_label,
+            center_crop=args.center_crop)
 
     if args.only in ("ai", "both"):
         print(f"  [ai]   {args.fake}")
@@ -488,7 +535,8 @@ def main():
             args.fake, args.fake_split, args.fake_config, args.image_column,
             want, args.min_edge, aspect_range,
             os.path.join(img_root, "ai"), "ai", fmt, survey=args.survey,
-            label_col=label_col, keep_label=fake_label)
+            label_col=label_col, keep_label=fake_label,
+            center_crop=args.center_crop)
 
     if args.survey:
         report_dimensions(add_pass_frac(summarize_dims(real_dims), args.min_edge),
