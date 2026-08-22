@@ -33,6 +33,11 @@
 #SBATCH --partition=a100_normal_q
 #SBATCH --output=logs/slurm/grpo-%j.out
 #SBATCH --error=logs/slurm/grpo-%j.err
+#SBATCH --mail-type=BEGIN,END,FAIL,TIME_LIMIT_80
+# Mail address is deliberately NOT hardcoded — this file is tracked in git.
+# SLURM delivers to $USER@<MailDomain> when the cluster sets one (check with
+# `scontrol show config | grep -i mail`); otherwise pass --mail-user on submit:
+#   sbatch --mail-user=you@vt.edu scripts/arc_infer.slurm
 
 set -euo pipefail
 mkdir -p logs/slurm "logs/${VRR_DATASET:-genimage}"
