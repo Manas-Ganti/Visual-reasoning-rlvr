@@ -65,6 +65,17 @@ def main() -> None:
     args = ap.parse_args()
 
     manifest = args.manifest or common.manifest_path(args.dataset)
+    if not os.path.exists(manifest):
+        root = os.path.join(common.REPO_ROOT, "data")
+        built = sorted(d for d in os.listdir(root)
+                       if os.path.exists(os.path.join(root, d, "manifest.jsonl")))
+        raise SystemExit(
+            f"no manifest at {manifest}\n"
+            f"  built datasets: {', '.join(built) or '(none)'}\n"
+            f"  build one first:   python data/build_manifest_hf.py --dataset "
+            f"{args.dataset} --real <repo> --fake <repo> --per-class 400\n"
+            f"  or screen a pair:  python data/build_manifest_hf.py --survey "
+            f"--dataset {args.dataset} --real <repo> --fake <repo> --per-class 100")
     rows = [json.loads(l) for l in open(manifest) if l.strip()]
     if args.split:
         rows = [r for r in rows if r.get("split") == args.split]
