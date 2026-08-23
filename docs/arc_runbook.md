@@ -7,7 +7,9 @@ dies on an import.
 
 Design docs live elsewhere — [`README.md`](../README.md),
 [`.claude/CLAUDE.md`](../.claude/CLAUDE.md). This file is only about the
-cluster.
+cluster — with one exception: the gate methodology below, because the way
+the gates were being measured wasted more GPU than every scheduling problem
+here combined. See [`results/geometry_confound.md`](../results/geometry_confound.md).
 
 ---
 
@@ -239,7 +241,50 @@ redirecting a 68 GB cache. `~/.bashrc` exports both `HF_HOME` and `CONDA_ENV`.
 
 ---
 
-## 4. Why the scheduling flags look like that
+## 4. Running the gates (read before trusting a number)
+
+Measure the substrate before the model, and rank before argmax. Both gates on
+`genwukong` returned interpretable-looking numbers that were measuring image
+size; the full account is in
+[`results/geometry_confound.md`](../results/geometry_confound.md).
+
+**Order matters.** Step 1 costs ten seconds and no GPU:
+
+```bash
+# 1. is the label readable from the FILE?  every predictor should be ~0.5
+python tools/manifest_stats.py --dataset <ds>
+
+# 2. ceiling — can the model do this at all?   want AUC >=0.85
+JOB=ceiling AUC=1 ... sbatch scripts/arc_infer.slurm
+
+# 3. floor — does the overview actually hide it?   want AUC ~0.5
+JOB=floor   AUC=1 ... sbatch scripts/arc_infer.slurm
+```
+
+**Always pass `AUC=1`.** Argmax accuracy measures the model's prior as much as
+its eyesight: a policy that ranks every AI image above every real one still
+scores at the majority baseline if it never crosses its own threshold for saying
+the rarer word. On this substrate that gap was 0.600 accuracy versus 0.874 AUC —
+the difference between "abandon the dataset" and "the dataset is fine".
+
+It matters even more on the floor, and in the more dangerous direction: a model
+answering `REAL` to everything scores ~0.50 there *whether or not the overview
+leaks the answer*, so an accuracy floor reads "perfect" from a measurement that
+cannot detect the failure it exists to catch.
+
+**`bytes/px` is not a confound.** The model sees pixels, never file size. A
+raised `bytes/px` means AI images are smoother and more compressible, which is a
+real visual property a detector should use. Geometry is the one that must be
+driven to 0.5 — aspect and size survive `make_overview` untouched, and Qwen bins
+images to a patch grid, so different sizes arrive as different token counts.
+
+**Fixing geometry:** `data/recrop_manifest.py --src <ds> --dst <ds>N --size N`
+crops images already on disk (no re-download, same selection), or
+`build_manifest_hf.py --center-crop N` at build time. Pick N as a multiple of 28
+and check what it drops — `392` kept 796/800 on genwukong where `448` dropped 49,
+all from the real class.
+
+## 5. Why the scheduling flags look like that
 
 Both jobs pended a full day before any of this was understood.
 
@@ -332,6 +377,15 @@ gate numbers are lost if that log is lost. **Open item: persist them.**
       carries roughly ±8pp at 95% confidence. A reading near the 0.85 gate is
       not decisive — re-run against `--split val` for a second independent 80.
 - [ ] Gate results to `results/$VRR_DATASET/gate_*.json` + optional `wandb.init`
+      (still stdout-only — every number in results/geometry_confound.md was
+      recovered from SLURM logs by hand)
+- [ ] genwukong392 floor is 0.673, not ~0.5 — 56% of the signal is free in the
+      overview. Try a PAIRED source (bitmind `<real>___<generator>`) and the
+      72B before committing this substrate to SFT
+- [ ] `train_all.sh` (untracked on ARC) hardcodes un-namespaced checkpoint
+      paths — `checkpoints/sft-$TAG` should be `checkpoints/$VRR_DATASET/...`,
+      and `SBATCH_PARTITION` is overridden by the `#SBATCH --partition` line
+      in each launcher, so it must go on the sbatch command line
 - [ ] `arc_env.sh` could probe for a usable `HF_HOME` the way
       `scripts/fetch_genimage.sh:72` probes for data storage
 - [ ] Make `PARTITION` / `ACCOUNT` / `GRES` / `TIME` real env knobs, or delete the
