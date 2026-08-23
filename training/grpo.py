@@ -268,7 +268,7 @@ def main():
     adapter = args.sft_checkpoint if is_adapter else None
 
     # GRPOConfig before the model: see the ZeRO-3 note in training/sft.py.
-    training_args = GRPOConfig(
+    training_args = GRPOConfig(**common.supported_config_kwargs(GRPOConfig, dict(
         output_dir=output_dir,
         per_device_train_batch_size=args.per_device_batch_size,
         gradient_accumulation_steps=args.grad_accum,
@@ -292,7 +292,7 @@ def main():
         # Only rank 0 reports, and only if wandb actually came up — otherwise HF
         # would try to init it a second time and fail for the same reason.
         report_to=["wandb"] if wandb_run is not None else [],
-    )
+    )))
 
     model, processor = common.load_policy(
         base_model, adapter=adapter, device=device, dtype=dtype, trainable=True

@@ -182,7 +182,7 @@ def main():
     # DeepSpeed config installs the global HfDeepSpeedConfig, which is what makes
     # ZeRO-3 shard parameters *during* `from_pretrained` instead of materializing
     # the full 72B on every rank (an instant OOM).
-    training_args = SFTConfig(
+    training_args = SFTConfig(**common.supported_config_kwargs(SFTConfig, dict(
         output_dir=output_dir,
         per_device_train_batch_size=args.per_device_batch_size,
         gradient_accumulation_steps=args.grad_accum,
@@ -207,7 +207,7 @@ def main():
         report_to=["wandb"] if wandb_run is not None else [],
         remove_unused_columns=False,
         dataset_kwargs={"skip_prepare_dataset": True},
-    )
+    )))
 
     model, processor = common.load_policy(
         model_name, adapter=None, device=device, dtype=dtype, trainable=True

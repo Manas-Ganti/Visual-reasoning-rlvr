@@ -283,6 +283,53 @@ def is_main() -> bool:
     return dist_info().is_main
 
 
+def supported_config_kwargs(cls, desired: dict) -> dict:
+    """Keep only the kwargs ``cls`` accepts, remapping obvious renames, loudly.
+
+    TRL's SFTConfig/GRPOConfig inherit from transformers' TrainingArguments, and
+    transformers 5.x moved several of its fields. A config written against 4.x
+    then dies at construction with ONE unexpected keyword at a time — each
+    discovered twenty minutes into a job holding a full node, and the next one
+    only after the first is fixed.
+
+    So adapt instead of guessing the new spelling. But never silently: a dropped
+    knob changes training behaviour, and that must appear in the log rather than
+    in a puzzling loss curve three hours later.
+    """
+    import dataclasses
+    import inspect
+
+    if dataclasses.is_dataclass(cls):
+        accepted = {f.name for f in dataclasses.fields(cls)}
+    else:
+        try:
+            accepted = set(inspect.signature(cls.__init__).parameters)
+        except (TypeError, ValueError):
+            return dict(desired)
+
+    out, dropped, remapped = {}, [], []
+    for k, v in desired.items():
+        if k in accepted:
+            out[k] = v
+            continue
+        # A rename usually keeps the distinctive stem: warmup_ratio -> lr_warmup_ratio.
+        stem = k.replace("_", "")
+        cand = [a for a in accepted if a not in desired and stem in a.replace("_", "")]
+        if len(cand) == 1:
+            out[cand[0]] = v
+            remapped.append(f"{k} -> {cand[0]}")
+        else:
+            dropped.append(k)
+
+    name = getattr(cls, "__name__", str(cls))
+    if remapped:
+        rank0_print(f"[{name}] remapped for this library version: {', '.join(remapped)}")
+    if dropped:
+        rank0_print(f"[{name}] WARNING dropped, not accepted by this version: "
+                    f"{', '.join(dropped)} — training differs from the requested config")
+    return out
+
+
 def rank0_print(*args, **kwargs) -> None:
     if is_main():
         print(*args, **kwargs)
