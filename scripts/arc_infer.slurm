@@ -85,6 +85,9 @@ case "$JOB" in
       --model "$MODEL" --backend vllm --tensor-parallel-size "$TP" \
       --batch-episodes "$BATCH_EPISODES" ${LIMIT:+--limit "$LIMIT"} \
       --seed "${SEED:-0}" ${APPEND:+--append} \
+      ${DUMP_FAILURES:+--dump-failures "$DUMP_FAILURES"} \
+      ${MAX_NEW_TOKENS:+--max-new-tokens "$MAX_NEW_TOKENS"} \
+      ${MAX_INSPECTS:+--max-inspects "$MAX_INSPECTS"} \
       --overview-long-edge "$OVERVIEW_LONG_EDGE" "$@"
     ;;
   eval)

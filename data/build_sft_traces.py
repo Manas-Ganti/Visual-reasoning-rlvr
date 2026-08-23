@@ -100,6 +100,12 @@ def main():
                          "different seed yields different trajectories over the same "
                          "images — the cheapest way to raise trace count when the keep "
                          "rate is low. Combine with --append.")
+    ap.add_argument("--dump-failures", default=None, metavar="PATH",
+                    help="Write rejected episodes here (capped at --dump-limit) with the "
+                         "reason and their raw turns. A keep rate is a symptom; the "
+                         "malformed turns themselves say whether the model ran past "
+                         "--max-new-tokens, dropped a field, or invented an action.")
+    ap.add_argument("--dump-limit", type=int, default=40)
     ap.add_argument("--append", action="store_true",
                     help="Append to --out instead of overwriting, to accumulate passes. "
                          "Repeated images with different trajectories are fine for SFT "
@@ -176,6 +182,16 @@ def main():
         {"c": bool(r["correct"]), "w": bool(r["well_formed"]), "a": bool(r["actions"])}
         for r in results
     ])
+    fails = common.gather_lists([
+        {"index": r["index"],
+         "reason": "malformed" if not r["well_formed"]
+                   else ("wrong_verdict" if not r["correct"] else "empty"),
+         "n_turns": len(r["actions"]),
+         "last_turn_words": len(r["actions"][-1].split()) if r["actions"] else 0,
+         "actions": r["actions"]}
+        for r in results
+        if not (r["correct"] and r["well_formed"] and r["actions"])
+    ][: max(args.dump_limit, 0)] if args.dump_failures else [])
 
     if dist.is_main:
         rows.sort(key=lambda r: r["index"])
@@ -201,6 +217,12 @@ def main():
             print("  -> VERDICT is the bottleneck: the teacher hint is not landing, so a "
                   "bigger teacher will not obviously help. Check TEACHER_HINT and whether "
                   "the substrate is simply hard at this overview resolution.")
+        if args.dump_failures:
+            bad = [r for r in fails][: args.dump_limit]
+            with open(args.dump_failures, "w") as f:
+                for r in bad:
+                    f.write(json.dumps(r) + "\n")
+            print(f"  wrote {len(bad)} rejected episode(s) to {args.dump_failures}")
         if len(rows) / max(len(jobs), 1) < 0.30:
             print("  -> low yield: rerun with --seed <n> --append to accumulate passes; "
                   "episodes are sampled, so each pass explores different trajectories.")
