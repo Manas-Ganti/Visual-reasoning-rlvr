@@ -22,9 +22,19 @@ export PROJECT_DIR="${PROJECT_DIR:-$SLURM_SUBMIT_DIR}"
 # overwrite each other. Override per submit: VRR_DATASET=faces sbatch ...
 export VRR_DATASET="${VRR_DATASET:-genimage}"
 # Overview resolution — the third difficulty axis, alongside degradation and
-# budget. INSPECT's zoom factor is native_size/this, so aim for ~native/7: 140
-# suits 1024px substrates, 70 suits 512px ones. Every launcher passes it, so
+# budget. INSPECT's zoom factor is native_size/this. Every launcher passes it, so
 # setting it here keeps a run's stages consistent with each other.
+#
+# Do NOT pick it by ratio. "~native/7" was calibrated when overview resolution and
+# cell size were coupled — at 512px natives a harsher blur bought nothing, since
+# the 4x4 cells were already too small for INSPECT to reveal anything. Above
+# 1024px they are decoupled (the cell is native/4 regardless), so the blur can be
+# pushed much harder for free. On synth1024, native/7 (=140) left a floor of
+# 0.740; native/21 (=48) put it at chance. See results/substrate_synth1024.md.
+#
+# Choose it by sweeping the FLOOR gate and taking the mildest blur whose AUC
+# confidence interval contains 0.5. The ceiling is measured at native resolution
+# and is unaffected, so only the floor needs re-running.
 export OVERVIEW_LONG_EDGE="${OVERVIEW_LONG_EDGE:-140}"
 # Model weights are tens to hundreds of GB — keep the HF cache on project/scratch
 # storage, never in $HOME (small quota, and it is not purged-but-fast storage).

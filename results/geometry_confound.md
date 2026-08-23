@@ -106,6 +106,11 @@ populations differ in style, and style survives any downsample. No crop fixes it
 are generated from the real set's own captions) attacks the cause; the 72B may
 widen the gap by lifting the ceiling without lifting the floor.
 
+**Resolved.** No public paired source had the resolution this environment needs —
+they are downsampled to 256–512px for CNN classifiers. The substrate was built
+instead, and clears both gates: see
+[`substrate_synth1024.md`](substrate_synth1024.md).
+
 ## Tooling this produced
 
 * `tools/manifest_stats.py` — scores aspect, long edge, area and bytes/px as

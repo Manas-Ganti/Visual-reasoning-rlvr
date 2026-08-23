@@ -278,6 +278,12 @@ real visual property a detector should use. Geometry is the one that must be
 driven to 0.5 — aspect and size survive `make_overview` untouched, and Qwen bins
 images to a patch grid, so different sizes arrive as different token counts.
 
+**Choosing `OVERVIEW_LONG_EDGE`:** sweep the floor, don't use a ratio. The
+ceiling is measured at native resolution so it is unaffected — only the floor
+needs re-running per value. Take the mildest blur whose floor CI contains 0.5.
+On `synth1024`: 140 → 0.740, 80 → 0.637, 48 → 0.556 (passes). Full result in
+[`results/substrate_synth1024.md`](../results/substrate_synth1024.md).
+
 **Fixing geometry:** `data/recrop_manifest.py --src <ds> --dst <ds>N --size N`
 crops images already on disk (no re-download, same selection), or
 `build_manifest_hf.py --center-crop N` at build time. Pick N as a multiple of 28
