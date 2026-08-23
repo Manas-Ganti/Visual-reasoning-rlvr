@@ -243,6 +243,61 @@ interpreter is a real binary before debugging anything else.** Hours went into
 the launcher scripts, PATH ordering, heredocs and `sitecustomize` before anyone
 ran `python -V`.
 
+### The HF token lives under `HF_HOME`, not in your home directory
+
+Same shape as the conda trap above: **relocating a root silently relocates
+something else you were not thinking about.**
+
+`huggingface_hub` reads the token from `$HF_HOME/token`. Every job here sets
+`HF_HOME=/home/manasganti/hf_cache`, so a token written by a plain `hf auth login`
+— which lands in `~/.cache/huggingface/token` — is invisible to all of them. The
+jobs then run **anonymously**, which is fine for cached and ungated models and
+fails only when something gated is downloaded:
+
+```
+GatedRepoError: 401 Client Error. Cannot access gated repo ...
+Access to model X is restricted. You must have access to it and be authenticated.
+```
+
+That message reads like a permissions problem. It is usually a path problem.
+
+**Do not diagnose it with `model_info`.** Hugging Face serves *metadata* for gated
+repos publicly, so `model_info('black-forest-labs/FLUX.1-dev')` succeeds while
+anonymous and proves nothing. Two commands that actually distinguish the cases:
+
+```bash
+# is a token found under THIS HF_HOME?
+HF_HOME=/home/manasganti/hf_cache python -c "from huggingface_hub import whoami; print(whoami()['name'])"
+# can it actually download a gated file?
+HF_HOME=/home/manasganti/hf_cache python -c "from huggingface_hub import hf_hub_download; print(hf_hub_download('black-forest-labs/FLUX.1-dev','model_index.json'))"
+```
+
+`LocalTokenNotFoundError` from the first means no token under this `HF_HOME` — a
+path problem. A username from the first and a 401 from the second means the licence
+genuinely has not been accepted for that account — a gate problem.
+
+**Fix, and where to put it.** Log in with `HF_HOME` set, so the token lands where
+the jobs look:
+
+```bash
+HF_HOME=/home/manasganti/hf_cache hf auth login       # -> /home/manasganti/hf_cache/token
+```
+
+Prefer this over `~/.config/vrr/secrets.env`. That file is only sourced by
+`arc_env.sh`, which only runs inside SLURM jobs — so login-node work (the crop and
+assemble stages, every interactive diagnostic) would still be anonymous, and the
+401 would return with no obvious reason. `$HF_HOME/token` covers both, since
+`~/.bashrc` exports `HF_HOME` for interactive shells and `sbatch --export=ALL`
+carries it into jobs.
+
+The cost of this arrangement: the token is tied to `HF_HOME`. Move the cache and
+it is orphaned, and the same misleading 401 comes back.
+
+**What is NOT affected:** anything already in the cache. Qwen2.5-VL-32B is
+ungated and fully downloaded, so distillation, SFT, GRPO and the gates all load it
+with no token at all. A token is needed only to fetch a gated repo — here, FLUX
+for the held-out generator set, which is eval-only and not on the critical path.
+
 ### Terminal paste corruption
 
 The VS Code remote terminal leaks bracketed-paste markers, which silently
