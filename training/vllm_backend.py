@@ -97,7 +97,7 @@ class VLLMPolicy:
         sample: bool = False,
         temperature: float = 0.7,
         top_p: float = 0.9,
-        max_new_tokens: int = 320,
+        max_new_tokens: int = 640,
         collect_tokens: bool = False,  # accepted for signature parity; always empty
     ) -> list[dict]:
         from vllm import SamplingParams

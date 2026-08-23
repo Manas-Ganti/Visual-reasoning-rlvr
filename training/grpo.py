@@ -190,7 +190,8 @@ def main():
     ap.add_argument("--max-steps", type=int, default=-1)
     ap.add_argument("--temperature", type=float, default=0.7)
     ap.add_argument("--top-p", type=float, default=0.9)
-    ap.add_argument("--max-new-tokens", type=int, default=320)
+    ap.add_argument("--max-new-tokens", type=int, default=640,
+                    help="640, not 320: distilling synth1024 showed ~28% of turns exceeding a 320-token budget mid-block, which loses the ACTION line and makes the turn unparseable — 80% of episodes were rejected for it. eval/harness.py already used 640; the rollout paths did not, so the policy was being cut off during training and not during evaluation.")
     ap.add_argument("--seed", type=int, default=0)
     # ---- scale / parallelism ----
     ap.add_argument("--per-device-batch-size", type=int, default=1,

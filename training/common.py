@@ -791,7 +791,7 @@ class HFPolicy:
 
     backend = "hf"
 
-    def __init__(self, model, processor, max_new_tokens: int = 320, repetition_penalty: float = 1.1):
+    def __init__(self, model, processor, max_new_tokens: int = 640, repetition_penalty: float = 1.1):
         self.model = model
         self.processor = processor
         self.max_new_tokens = max_new_tokens
@@ -871,7 +871,7 @@ def run_episode(
     sample: bool = True,
     temperature: float = 0.7,
     top_p: float = 0.9,
-    max_new_tokens: int = 320,
+    max_new_tokens: int = 640,
     collect_tokens: bool = True,
     on_reset=None,
 ):
@@ -943,7 +943,7 @@ def run_episodes_batched(
     sample: bool = False,
     temperature: float = 0.7,
     top_p: float = 0.9,
-    max_new_tokens: int = 320,
+    max_new_tokens: int = 640,
     on_reset=None,
     on_episode=None,
 ) -> list[dict]:
