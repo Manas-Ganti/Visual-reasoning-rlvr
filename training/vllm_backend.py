@@ -211,6 +211,10 @@ def build_policy(args, *, adapter: str | None = None):
             max_model_len=getattr(args, "max_model_len", 16384),
             gpu_memory_utilization=getattr(args, "gpu_memory_utilization", 0.90),
             max_images_per_prompt=getattr(args, "max_inspects", 4) + 4,
+            # Without this the engine seed is always 0, so a sampled run is
+            # reproducible — which is right for eval and wrong for distillation,
+            # where repeated passes are how you accumulate traces.
+            seed=getattr(args, "seed", 0),
         )
     device = common.resolve_device("auto")
     dtype = common.resolve_dtype(device, use_bf16=common.is_cuda(device))

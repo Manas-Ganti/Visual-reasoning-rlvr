@@ -78,9 +78,13 @@ case "$JOB" in
       --overview-long-edge "$OVERVIEW_LONG_EDGE" "$@"
     ;;
   distill)
+    # SEED/APPEND accumulate traces across passes: episodes are sampled, so a
+    # second pass over the same images explores different trajectories. Needed
+    # whenever the keep rate is low enough that one pass underfeeds SFT.
     "$PY" data/build_sft_traces.py \
       --model "$MODEL" --backend vllm --tensor-parallel-size "$TP" \
       --batch-episodes "$BATCH_EPISODES" ${LIMIT:+--limit "$LIMIT"} \
+      --seed "${SEED:-0}" ${APPEND:+--append} \
       --overview-long-edge "$OVERVIEW_LONG_EDGE" "$@"
     ;;
   eval)

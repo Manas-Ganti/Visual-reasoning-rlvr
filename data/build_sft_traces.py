@@ -95,6 +95,15 @@ def main():
     ap.add_argument("--degradation", default="clean")
     ap.add_argument("--limit", type=int, default=None, help="Cap #train images attempted.")
     ap.add_argument("--temperature", type=float, default=0.6)
+    ap.add_argument("--seed", type=int, default=0,
+                    help="Engine seed. Episodes are SAMPLED, so a second pass at a "
+                         "different seed yields different trajectories over the same "
+                         "images — the cheapest way to raise trace count when the keep "
+                         "rate is low. Combine with --append.")
+    ap.add_argument("--append", action="store_true",
+                    help="Append to --out instead of overwriting, to accumulate passes. "
+                         "Repeated images with different trajectories are fine for SFT "
+                         "and add demonstration diversity.")
     ap.add_argument("--max-new-tokens", type=int, default=320)
     vllm_backend.add_backend_args(ap)
     args = ap.parse_args()
@@ -159,14 +168,42 @@ def main():
         if r["correct"] and r["well_formed"] and r["actions"]
     ]
     rows = common.gather_lists(rows)
+    # A bare keep rate says a substrate is expensive to distil but not why. The
+    # two failures want opposite fixes: bad FORMAT calls for a bigger teacher or
+    # fewer turns to get right, while a wrong VERDICT under a revealed label means
+    # the teacher hint is not landing.
+    flags = common.gather_lists([
+        {"c": bool(r["correct"]), "w": bool(r["well_formed"]), "a": bool(r["actions"])}
+        for r in results
+    ])
 
     if dist.is_main:
         rows.sort(key=lambda r: r["index"])
-        with open(args.out, "w") as f:
+        mode = "a" if args.append else "w"
+        with open(args.out, mode) as f:
             for row in rows:
                 f.write(json.dumps(row) + "\n")
+        total = sum(1 for _ in open(args.out))
         print(f"Wrote {len(rows)} SFT traces to {args.out} "
-              f"(keep rate {len(rows) / max(len(jobs), 1):.1%}).")
+              f"(keep rate {len(rows) / max(len(jobs), 1):.1%}"
+              f"{f'; {total} total after append' if args.append else ''}).")
+
+        n = max(len(flags), 1)
+        bad_fmt = sum(1 for x in flags if not x["w"])
+        bad_verdict = sum(1 for x in flags if x["w"] and not x["c"])
+        empty = sum(1 for x in flags if x["w"] and x["c"] and not x["a"])
+        print(f"  dropped: {bad_fmt} malformed ({bad_fmt / n:.1%}), "
+              f"{bad_verdict} wrong verdict ({bad_verdict / n:.1%}), {empty} empty")
+        if bad_fmt > bad_verdict:
+            print("  -> FORMAT is the bottleneck: try --model 72b (a bigger teacher is "
+                  "worth it here) or fewer --max-inspects, since every turn must parse.")
+        elif bad_verdict:
+            print("  -> VERDICT is the bottleneck: the teacher hint is not landing, so a "
+                  "bigger teacher will not obviously help. Check TEACHER_HINT and whether "
+                  "the substrate is simply hard at this overview resolution.")
+        if len(rows) / max(len(jobs), 1) < 0.30:
+            print("  -> low yield: rerun with --seed <n> --append to accumulate passes; "
+                  "episodes are sampled, so each pass explores different trajectories.")
     common.cleanup_distributed()
 
 
