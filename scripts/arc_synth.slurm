@@ -64,6 +64,7 @@ case "$STAGE" in
       --sdxl "${SDXL:-stabilityai/stable-diffusion-xl-base-1.0}" \
       ${CAPTIONS:+--captions "$CAPTIONS"} \
       --steps "${STEPS:-30}" --guidance "${GUIDANCE:-5.5}" \
+      --dtype "${DTYPE:-bf16}" --variant "${VARIANT-fp16}" \
       --size "${SIZE:-1024}" --generator "${GENERATOR:-sdxl}" "$@"
     ;;
   crop|assemble)

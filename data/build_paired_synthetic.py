@@ -221,9 +221,19 @@ def stage_generate(args) -> None:
     out = class_dir(args.dataset, args.generator, "ai")
     os.makedirs(out, exist_ok=True)
 
-    pipe = AutoPipelineForText2Image.from_pretrained(
-        args.sdxl, torch_dtype=torch.float16, variant="fp16", use_safetensors=True
-    ).to("cuda")
+    dtype = {"bf16": torch.bfloat16, "fp16": torch.float16}[args.dtype]
+    kw = {"torch_dtype": dtype, "use_safetensors": True}
+    try:
+        # SDXL publishes fp16-variant weights (half the download); FLUX does not,
+        # and asking for a variant a repo lacks is a hard error, not a fallback.
+        pipe = AutoPipelineForText2Image.from_pretrained(
+            args.sdxl, **({"variant": args.variant} if args.variant else {}), **kw)
+    except ValueError as e:
+        if "variant" not in str(e):
+            raise
+        print(f"  no '{args.variant}' variant for {args.sdxl}; loading default weights")
+        pipe = AutoPipelineForText2Image.from_pretrained(args.sdxl, **kw)
+    pipe = pipe.to("cuda")
     pipe.set_progress_bar_config(disable=True)
 
     # Audit before spending an hour: the encoder's own tokenizer is the only
@@ -353,6 +363,14 @@ def main() -> None:
                     help="Generation cap. Sized just above --caption-words so an "
                          "overshoot is visible as a cut caption rather than paid for "
                          "in tokens the generator will discard anyway.")
+    ap.add_argument("--dtype", choices=["bf16", "fp16"], default="bf16",
+                    help="bf16 by default: it is native on H200 and it is what FLUX is "
+                         "distributed in — loading FLUX as fp16 risks NaNs and black "
+                         "images. SDXL is fine either way.")
+    ap.add_argument("--variant", default="fp16",
+                    help="Weight variant to prefer. SDXL publishes fp16 weights (half "
+                         "the download); repos that do not are detected and fall back to "
+                         "the default weights. Pass '' to skip the attempt.")
     ap.add_argument("--steps", type=int, default=30)
     ap.add_argument("--guidance", type=float, default=5.5,
                     help="CFG. Deliberately lower than the usual 7.5+: high guidance "
