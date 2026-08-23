@@ -130,10 +130,35 @@ On `*_preemptable_q`, add `REQUEUE` to the mail-type list.
 
 ### Two envs, and they must stay separate
 
-| env | path | holds | used by |
+| env | path | key versions | used by |
 |---|---|---|---|
-| `vrr` | `/home/manasganti/miniconda3/envs/vrr` | vLLM 0.8.5, torch 2.6.0+cu124, transformers 4.51.3 | gates, distill, eval |
-| `vrr-train` | `/home/manasganti/.conda/envs/vrr-train` | trl (no vLLM) | SFT, GRPO |
+| `vrr` | `/home/manasganti/miniconda3/envs/vrr` | vLLM 0.8.5 · transformers **4.51.3** · torch 2.6.0+cu124 | gates, captioning, distill, eval, groupvar |
+| `vrr-train` | `/home/manasganti/.conda/envs/vrr-train` | trl 1.9.2 · transformers **5.15.0** · peft 0.20.0 · accelerate 1.14.0 · deepspeed 0.19.5 | **SFT, GRPO** |
+| `vrr-gen` | `/home/manasganti/miniconda3/envs/vrr-gen` | diffusers · torch | image generation (SDXL/FLUX) |
+
+**Crossing them fails at import, ~20 minutes into a job holding a full node:**
+
+```
+ImportError: cannot import name 'is_trackio_available' from 'transformers'
+RuntimeError: Failed to import trl.trainer.sft_trainer
+```
+
+That is `vrr`'s transformers 4.51.3 against `trl 1.9.2`, which needs >=4.56.2. It
+cost one 8-GPU SFT submission. **`CONDA_ENV` must be `vrr-train` for
+`arc_sft.slurm` and `arc_grpo.slurm`, and `vrr` for everything under
+`arc_infer.slurm`.**
+
+Verify a training env without a GPU — these are the four transformers symbols
+`training/common.py` uses (lines 482, 632, 645, 673) plus the TRL and PEFT entry
+points:
+
+```bash
+$ENV/bin/python -c "from transformers import TrainerCallback, AutoProcessor, AutoModelForImageTextToText; from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled; from trl import SFTConfig, SFTTrainer; from peft import LoraConfig; print('ALL PRESENT')"
+```
+
+Do **not** import `deepspeed` as part of that check on a login node — it pulls in
+Triton, which raises `RuntimeError: 0 active drivers` with no GPU present. That is
+the login node, not a broken env. Use `pip list` for its version instead.
 
 `vllm 0.8.5` pins transformers near 4.51; `trl 1.9.2` wants `>=4.56.2`. Those
 cannot coexist. Do not try to unify them. This mirrors the repo's own split —
@@ -651,9 +676,10 @@ gate numbers are lost if that log is lost. **Open item: persist them.**
       passed or exported on every submit.
 - [ ] `git remote set-url origin git@github.com:Manas-Ganti/Visual-reasoning-rlvr.git`
       (the old URL redirects with a warning on every push).
-- [ ] Confirm `vrr-train` has a trl-compatible transformers before Stage 1 —
-      `trl 1.9.2` wants `transformers>=4.56.2` while `vrr`'s vLLM pins 4.51.3.
-      That is why the two envs exist; do not try to unify them.
+- [x] `vrr-train` confirmed trl-compatible: transformers 5.15.0 vs trl 1.9.2's
+      `>=4.56.2`. Note it is transformers **5.x**, a major version ahead of
+      `requirements.txt`'s `>=4.51` — the four symbols `training/` imports were
+      verified present, but other 5.x moves may surface deeper into training.
 - [x] `synth1024` gates — ceiling 0.930, floor 0.591 at
       `OVERVIEW_LONG_EDGE=56`. See `results/substrate_synth1024.md`.
 - [x] `train_all.sh` namespacing and `SBATCH_PARTITION` — fixed, and it now
