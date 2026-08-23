@@ -1,15 +1,54 @@
 # ARC runbook — operational gotchas
 
-Session notes from getting the GenImage/`genwukong` gate probes to actually run
-on VT ARC (TinkerCliffs). Everything here cost at least one wasted GPU
-allocation. Read this before debugging a job that "just won't start" or that
-dies on an import.
+Everything here cost at least one wasted GPU allocation. Read it before debugging
+a job that "just won't start", dies on an import, completes suspiciously fast, or
+returns a gate number that looks interpretable.
+
+**Start with *Where the project is* below** — it carries the current substrate,
+the settings every stage must share, and what is in flight.
 
 Design docs live elsewhere — [`README.md`](../README.md),
 [`.claude/CLAUDE.md`](../.claude/CLAUDE.md). This file is only about the
 cluster — with one exception: the gate methodology below, because the way
 the gates were being measured wasted more GPU than every scheduling problem
 here combined. See [`results/geometry_confound.md`](../results/geometry_confound.md).
+
+---
+
+## Where the project is (2026-08-23)
+
+**Substrate: `synth1024`. Both Gate-1 halves pass. `OVERVIEW_LONG_EDGE=56`.**
+
+```
+ceiling  AUC 0.930  [0.89, 0.97]   gate >=0.85   PASS
+floor    AUC 0.591  [0.50, 0.68]   gate ~0.50    PASS   (at OVERVIEW_LONG_EDGE=56)
+geometry aspect / long edge / area all 0.500 by construction
+```
+
+Full account: [`results/substrate_synth1024.md`](../results/substrate_synth1024.md).
+Why the earlier substrates failed: [`results/geometry_confound.md`](../results/geometry_confound.md).
+
+Three substrates were tried before this one:
+
+| substrate | outcome |
+|---|---|
+| faces (300px) | retired — no evidence to reveal, 75px cells |
+| `genwukong` (512px) | gates were measuring image size (area AUC 0.850) |
+| `genwukong392` | confound removed; ceiling 0.809, floor 0.673 — 56% of the answer free |
+| **`synth1024`** | **built to spec — both gates pass** |
+
+In flight as of the last session: distill `7242560` → SFT `7242576`
+(`afterok` chained). Not yet run: Gate 2 (group variance), GRPO, eval.
+
+**The settings every stage must share** — a chain that trains at one overview
+resolution and evaluates at another produces numbers that are quietly meaningless:
+
+```
+VRR_DATASET=synth1024
+OVERVIEW_LONG_EDGE=56
+HF_HOME=/home/manasganti/hf_cache
+CONDA_ENV=/home/manasganti/miniconda3/envs/vrr        # vrr-gen for diffusers stages
+```
 
 ---
 
@@ -20,7 +59,7 @@ cd ~/ondemand/data/VLM-RL-aicontent-detection
 git pull --ff-only origin rebuild/visual-reasoning-rlvr
 
 HF_HOME=/home/manasganti/hf_cache CONDA_ENV=/home/manasganti/miniconda3/envs/vrr \
-OVERVIEW_LONG_EDGE=64 VRR_DATASET=genwukong JOB=ceiling TP=1 \
+OVERVIEW_LONG_EDGE=56 VRR_DATASET=synth1024 JOB=ceiling AUC=1 TP=1 \
 sbatch --account=ece-6474-spring2026 --partition=h200_normal_q --qos=tc_h200_normal_short \
        --gres=gpu:h200:1 --cpus-per-task=8 --mem=96G --time=00:30:00 \
        --mail-user=manasganti@vt.edu scripts/arc_infer.slurm
@@ -34,7 +73,7 @@ If your terminal mangles multi-line pastes (see *Terminal paste corruption*
 below), use the one-line form, which has nothing for bracketed paste to break:
 
 ```bash
-HF_HOME=/home/manasganti/hf_cache CONDA_ENV=/home/manasganti/miniconda3/envs/vrr OVERVIEW_LONG_EDGE=64 VRR_DATASET=genwukong JOB=ceiling TP=1 sbatch --account=ece-6474-spring2026 --partition=h200_normal_q --qos=tc_h200_normal_short --gres=gpu:h200:1 --cpus-per-task=8 --mem=96G --time=00:30:00 --mail-user=manasganti@vt.edu scripts/arc_infer.slurm
+HF_HOME=/home/manasganti/hf_cache CONDA_ENV=/home/manasganti/miniconda3/envs/vrr OVERVIEW_LONG_EDGE=56 VRR_DATASET=synth1024 JOB=ceiling AUC=1 TP=1 sbatch --account=ece-6474-spring2026 --partition=h200_normal_q --qos=tc_h200_normal_short --gres=gpu:h200:1 --cpus-per-task=8 --mem=96G --time=00:30:00 --mail-user=manasganti@vt.edu scripts/arc_infer.slurm
 ```
 
 ---
@@ -342,6 +381,87 @@ and `TP=1`. **`TP` must equal the GPU count** — `arc_infer.slurm` defaults it 
 
 ---
 
+## 6. Building a substrate (when none off the shelf fits)
+
+No public AI-detection dataset surveyed had what this environment needs — they
+are downsampled to 256–512px for CNN classifiers, and a 4×4 cell of a 256px image
+is 64 pixels, so `INSPECT` upscales a blur. `data/build_paired_synthetic.py`
+builds one instead: real photographs cropped to a fixed size, captioned by the
+VLM, and a synthetic half generated from those captions.
+
+```bash
+# 1. reals — login node, no GPU. DIV2K (~2040x1356) at /home/manasganti/realsrc/
+python data/build_paired_synthetic.py --stage crop --dataset synth1024 \
+    --real-src /home/manasganti/realsrc/DIV2K_train_HR --per-class 800
+
+# 2. captions — vLLM env
+STAGE=caption DATASET=synth1024 CONDA_ENV=.../vrr     sbatch ... scripts/arc_synth.slurm
+# 3. generate — diffusers env
+STAGE=generate DATASET=synth1024 CONDA_ENV=.../vrr-gen sbatch ... scripts/arc_synth.slurm
+
+# 4. assemble + verify — login node
+python data/build_paired_synthetic.py --stage assemble --dataset synth1024
+python tools/manifest_stats.py --dataset synth1024      # geometry must be 0.500
+```
+
+Every stage is restartable — each skips what is already on disk — so a preempted
+job resumes by resubmitting the identical line. To re-caption, move
+`captions.jsonl` aside first or the stage will consider the work done.
+
+Three settings are load-bearing, and two were wrong on the first attempt:
+
+* **Caption length and ordering.** SDXL's CLIP encoders keep ~77 tokens and
+  discard the rest silently. Qwen overshoots any word limit, and its natural
+  ordering puts the subject first and the incidental detail last — so truncation
+  eats exactly the clutter the pairing exists to preserve. Ask for ~50 words as a
+  fragment, **clutter first, subject and lighting last**.
+* **Guidance scale 5.5, no negative prompt.** High CFG and "blurry, low quality"
+  negatives both push toward saturated, over-stylised output — a *global*
+  difference that survives any downsample and hands the floor a free answer.
+* **Crop before captioning.** The captioner must describe the cropped view the
+  model will actually be shown; otherwise every fake depicts a wider scene than
+  its paired real. The stage order already enforces this.
+
+An existing substrate can be re-cropped without rebuilding:
+`python data/recrop_manifest.py --src <ds> --dst <ds>N --size N`.
+
+## 7. The training chain
+
+`./scripts/train_all.sh` submits distill → SFT → GRPO → eval as one `afterok`
+chain. It refuses to run without `GATES_OK=1`, and `DRY_RUN=1` prints every
+sbatch line without submitting.
+
+```bash
+VRR_DATASET=synth1024 OVERVIEW_LONG_EDGE=56 GATES_OK=1 DRY_RUN=1 \
+  SBATCH_ACCOUNT=ece-6474-spring2026 MAIL_USER=manasganti@vt.edu \
+  CONDA_ENV=/home/manasganti/miniconda3/envs/vrr HF_HOME=/home/manasganti/hf_cache \
+  ./scripts/train_all.sh
+```
+
+**Gate 2 is deliberately not in the chain.** Group variance is measured against
+the SFT checkpoint, and an `afterok` dependency cannot express "stop if this
+number is too low" — which is the whole point when the next stage costs 48 hours:
+
+```bash
+JOB=groupvar ADAPTER=checkpoints/synth1024/sft-qwen2.5-vl-32b ... scripts/arc_infer.slurm
+# want usable_groups >= 0.40
+```
+
+Two numbers to read rather than judge:
+
+* **Distillation keep rate** (printed at the end of the distill log).
+  `build_sft_traces.py` writes a trace only if every turn parses AND the verdict
+  matches ground truth, so malformed traces cannot reach the file — the risk is
+  too few, not bad. ≥40% is healthy; under ~15% means SFT will underfit, and the
+  fix is to distil with `--model 72b` (the docstring recommends a bigger teacher
+  than the student for exactly this).
+* **`usable_groups`** from Gate 2. Under 0.40, GRPO has no gradient to work with.
+
+Queue shapes: inference and generation are one GPU (`--gres=gpu:h200:1`); SFT and
+GRPO are data-parallel across a full node (`gpu:h200:8`) and queue much slower —
+there are only six H200 nodes. GRPO's 48h exceeds the short QOS cap, so it must
+use `tc_h200_normal_base`.
+
 ## Preflight (all cheap, all on the login node)
 
 ```bash
@@ -388,24 +508,29 @@ gate numbers are lost if that log is lost. **Open item: persist them.**
 
 ## Open items
 
-- [x] `data/genwukong/manifest.jsonl` — verified: 800 rows, 50/50 balanced
-      (`train` 320+320, `val` 40+40, `test` 40+40). Note the probe's
-      `--limit 200` default is moot: `test` holds only 80 images, so accuracy
-      carries roughly ±8pp at 95% confidence. A reading near the 0.85 gate is
-      not decisive — re-run against `--split val` for a second independent 80.
-- [ ] Gate results to `results/$VRR_DATASET/gate_*.json` + optional `wandb.init`
-      (still stdout-only — every number in results/geometry_confound.md was
-      recovered from SLURM logs by hand)
-- [ ] genwukong392 floor is 0.673, not ~0.5 — 56% of the signal is free in the
-      overview. Try a PAIRED source (bitmind `<real>___<generator>`) and the
-      72B before committing this substrate to SFT
-- [ ] `train_all.sh` (untracked on ARC) hardcodes un-namespaced checkpoint
-      paths — `checkpoints/sft-$TAG` should be `checkpoints/$VRR_DATASET/...`,
-      and `SBATCH_PARTITION` is overridden by the `#SBATCH --partition` line
-      in each launcher, so it must go on the sbatch command line
+- [ ] **Gate results are stdout-only.** `training/common.py:114` defines
+      `results_dir()` but neither probe uses it, so every number in
+      `results/*.md` was recovered from SLURM logs by hand. Persist to
+      `results/$VRR_DATASET/gate_*.json` (+ optional `wandb.init`).
+- [ ] **Held-out generator.** Every fake in `synth1024` is SDXL, so a trained
+      detector may learn SDXL artifacts rather than AI artifacts. Generate a
+      second set from FLUX with the same captions under a different
+      `--generator` tag, eval only — `eval/harness.py` already breaks results
+      down per generator, and it turns "detects SDXL" into "the investigation
+      transfers to a generator it never saw".
+- [ ] **`.claude/CLAUDE.md` is gitignored**, so the corrected gate commands
+      (manifest_stats first, `--auc` always) exist only on the Mac. The ARC copy
+      still documents the accuracy-based gate that caused the confound.
 - [ ] `arc_env.sh` could probe for a usable `HF_HOME` the way
-      `scripts/fetch_genimage.sh:72` probes for data storage
-- [ ] Make `PARTITION` / `ACCOUNT` / `GRES` / `TIME` real env knobs, or delete the
-      comments promising them
+      `scripts/fetch_genimage.sh:72` probes for data storage — it still defaults
+      to `/projects/$USER/hf_cache`, which is wrong here, so `HF_HOME` must be
+      passed or exported on every submit.
 - [ ] `git remote set-url origin git@github.com:Manas-Ganti/Visual-reasoning-rlvr.git`
-- [ ] Confirm `vrr-train` has a trl-compatible transformers before Stage 1
+      (the old URL redirects with a warning on every push).
+- [ ] Confirm `vrr-train` has a trl-compatible transformers before Stage 1 —
+      `trl 1.9.2` wants `transformers>=4.56.2` while `vrr`'s vLLM pins 4.51.3.
+      That is why the two envs exist; do not try to unify them.
+- [x] `synth1024` gates — ceiling 0.930, floor 0.591 at
+      `OVERVIEW_LONG_EDGE=56`. See `results/substrate_synth1024.md`.
+- [x] `train_all.sh` namespacing and `SBATCH_PARTITION` — fixed, and it now
+      refuses to submit without `GATES_OK=1`.
