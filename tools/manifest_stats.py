@@ -138,10 +138,12 @@ def main() -> None:
     }
     print("\nstandalone label predictors — no model, no content, just the file:")
     worst = ("", 0.5)
+    strengths = {}
     for name, vals in features.items():
         a = auc(vals, labels)
         # Direction-free: a confound running the other way is just as damaging.
         strength = max(a, 1 - a)
+        strengths[name.strip()] = strength
         flag = "  <-- LEAK" if strength >= 0.65 else ""
         print(f"  {name} AUC={a:.3f}  strength={strength:.3f}{flag}")
         if strength > worst[1]:
@@ -154,6 +156,20 @@ def main() -> None:
         print(f"  {tag}: {sq:.0%} square, modal size {top} at {cnt}/{len(v)}")
 
     print(f"\nstrongest shortcut: {worst[0]} at strength {worst[1]:.3f}")
+    # bytes/px is not a shortcut in the same sense as the geometric ones: the model
+    # is shown pixels, never the file. A raised value means one class compresses
+    # better — i.e. is smoother — which is a real visual property a detector should
+    # be using, not a container artifact to be engineered away.
+    if worst[0].startswith("bytes"):
+        geo = max(strengths[k] for k in strengths if not k.startswith("bytes"))
+        print("  NOTE: the strongest signal is bytes/px, which the model never sees. "
+              "It indicates one class is smoother and so more compressible — a genuine "
+              "visual difference, not a container confound. Do not engineer it away.")
+        print(f"  Geometry, which the model DOES see through the overview, is at "
+              f"{geo:.3f}.")
+        if geo < 0.65:
+            print("  VERDICT: container is clean.")
+            return
     if worst[1] >= 0.80:
         print("  VERDICT: the label is largely readable from the file alone. No gate "
               "number means anything until this is equalised — a policy can score "
