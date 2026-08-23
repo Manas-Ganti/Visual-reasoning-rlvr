@@ -62,6 +62,7 @@ case "$STAGE" in
     "$PY" data/build_paired_synthetic.py \
       --stage generate --dataset "$DATASET" \
       --sdxl "${SDXL:-stabilityai/stable-diffusion-xl-base-1.0}" \
+      ${CAPTIONS:+--captions "$CAPTIONS"} \
       --steps "${STEPS:-30}" --guidance "${GUIDANCE:-5.5}" \
       --size "${SIZE:-1024}" --generator "${GENERATOR:-sdxl}" "$@"
     ;;
@@ -71,7 +72,7 @@ case "$STAGE" in
       --stage "$STAGE" --dataset "$DATASET" \
       --size "${SIZE:-1024}" --per-class "${PER_CLASS:-400}" \
       --generator "${GENERATOR:-sdxl}" \
-      ${REAL_SRC:+--real-src "$REAL_SRC"} "$@"
+      ${REAL_SRC:+--real-src "$REAL_SRC"} ${REAL_DIR:+--real-dir "$REAL_DIR"} "$@"
     ;;
   *)
     echo "STAGE must be one of: crop | caption | generate | assemble" >&2

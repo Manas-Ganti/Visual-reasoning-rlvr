@@ -204,9 +204,12 @@ def stage_caption(args) -> None:
 def stage_generate(args) -> None:
     # Check inputs BEFORE importing torch/diffusers: loading them takes seconds and
     # fails with a library-path traceback that says nothing about the real problem.
-    cpath = captions_path(args.dataset)
+    cpath = args.captions or captions_path(args.dataset)
     if not os.path.exists(cpath):
-        raise SystemExit(f"no captions at {cpath} — run --stage caption first")
+        raise SystemExit(f"no captions at {cpath} — run --stage caption first, or pass "
+                         f"--captions to reuse another namespace's captions (which is how "
+                         f"a held-out generator set is built: same captions, same reals, "
+                         f"only the generator differs)")
     with open(cpath) as f:
         caps = [json.loads(l) for l in f if l.strip()]
     if not caps:
@@ -269,7 +272,10 @@ def stage_generate(args) -> None:
 # stage 4 — assemble
 # --------------------------------------------------------------------------- #
 def stage_assemble(args) -> None:
-    reals = _listing(class_dir(args.dataset, args.generator, "real"))
+    # A held-out generator set reuses the ORIGINAL reals — regenerating or copying
+    # them would change the real half between train and eval, which is exactly the
+    # confound the eval is meant to be free of.
+    reals = _listing(args.real_dir or class_dir(args.dataset, args.generator, "real"))
     fakes = _listing(class_dir(args.dataset, args.generator, "ai"))
     if not reals or not fakes:
         raise SystemExit(f"one class is empty (real={len(reals)}, ai={len(fakes)})")
@@ -325,6 +331,14 @@ def main() -> None:
     ap.add_argument("--image-column", default=None)
     ap.add_argument("--model", default=common.DEFAULT_MODEL, help="Captioning VLM.")
     ap.add_argument("--sdxl", default="stabilityai/stable-diffusion-xl-base-1.0")
+    ap.add_argument("--captions", default=None, metavar="PATH",
+                    help="Reuse another namespace's captions.jsonl. For a held-out "
+                         "generator: same captions, same reals, only the generator "
+                         "changes — so eval isolates the generator and nothing else.")
+    ap.add_argument("--real-dir", default=None, metavar="DIR",
+                    help="Take the real half from here instead of "
+                         "data/<dataset>/images/<generator>/real. Pairs a new AI half "
+                         "against the ORIGINAL reals without copying them.")
     ap.add_argument("--per-class", type=int, default=400)
     ap.add_argument("--size", type=int, default=1024,
                     help="Both classes end up exactly SIZE x SIZE, so aspect, area and "
