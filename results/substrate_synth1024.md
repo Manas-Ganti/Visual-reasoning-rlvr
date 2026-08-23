@@ -1,7 +1,8 @@
 # A substrate that clears both gates — built, because none was found
 
 **Date:** 2026-08-23 · **Model:** Qwen2.5-VL-32B-Instruct ·
-**Dataset:** `synth1024` — DIV2K photographs vs. SDXL, 1570 images, 1024×1024
+**Dataset:** `synth1024` — DIV2K photographs vs. SDXL, 1570 images, 1024×1024 ·
+**`OVERVIEW_LONG_EDGE=56`**
 
 Three public substrates were measured and none passed. The faces set had no
 evidence to reveal (300px images → 75px cells). GenImage/Wukong's gates turned out
@@ -17,8 +18,8 @@ So the substrate was built to specification instead.
 
 ```
 ceiling  AUC 0.930   95% CI [0.89, 0.97]   calibrated accuracy 0.878     gate >=0.85  PASS
-floor    AUC 0.556   95% CI [0.47, 0.65]   contains chance               gate ~0.50   PASS
-gap      0.374  — 87% of the discriminative signal requires investigation
+floor    AUC 0.591   95% CI [0.50, 0.68]   at OVERVIEW_LONG_EDGE=56      gate ~0.50   PASS
+gap      0.339  — 79% of the discriminative signal requires investigation
 ```
 
 n = 156 test images, 78 per class.
@@ -60,8 +61,9 @@ that is `OVERVIEW_LONG_EDGE=140`, and it fails:
 |---|---|---|---|---|
 | 140 | 7× | 0.740 | [0.66, 0.82] | 56% |
 | 80 | 13× | 0.637 | [0.55, 0.72] | 32% |
-| 64 | 16× | *see note* | | |
-| **48** | **21×** | **0.556** | **[0.47, 0.65]** | **13%** |
+| 64 | 16× | 0.601 | [0.51, 0.69] | 24% |
+| **56** | **18×** | **0.591** | **[0.50, 0.68]** | **21%**  ← chosen |
+| 48 | 21× | 0.556 | [0.47, 0.65] | 13% |
 
 native/7 was calibrated when overview resolution and cell size were coupled: at
 512px natives a harsher overview bought nothing, because the 4×4 cells were
@@ -73,10 +75,24 @@ blur whose floor CI contains chance.**
 The ceiling is measured at native resolution and is therefore independent of this
 setting; only the floor needs re-running when it changes.
 
-Note on 48 vs 64: at 48 the overview is hard for a *human* to plan from, and an
-overview nobody can direct an investigation from breaks the environment in a way
-the floor gate does not measure — cell selection degenerates to random. 64 was
-probed for that reason.
+**48, 56 and 64 are statistically indistinguishable.** At n=156 the standard error
+on each is ~0.045, against differences of 0.035–0.045; the intervals overlap
+almost entirely. The sweep resolves the *shape* of the curve — 140 and 80 clearly
+fail — but not the bottom of it, and further probes would resample noise rather
+than settle anything.
+
+**56 was chosen on a criterion the gate cannot measure.** At 48 the overview is
+hard for a human to plan from, and an overview nobody can direct an investigation
+from breaks the environment in a different way: cell selection degenerates to
+random, and the predict-then-verify mechanism has nothing to condition a
+hypothesis on. The floor gate is blind to that failure — it only asks whether the
+answer is free, not whether the search can be aimed. 56 is also 2×28, an exact
+multiple of Qwen's patch size.
+
+What that buys, stated plainly: an overview-only policy reaches ~0.60 accuracy
+against a 0.50 baseline, while a full-resolution investigator reaches 0.878. The
+reward gradient points at investigating by a wide margin, which is the property
+the environment needs.
 
 ## Why the accuracy framing would have rejected this substrate
 
