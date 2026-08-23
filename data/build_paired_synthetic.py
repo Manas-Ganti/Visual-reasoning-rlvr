@@ -47,18 +47,23 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from build_manifest_hf import assign_splits  # noqa: E402
 from training import common  # noqa: E402
 
-# Dense enough that the generator must render a specific, cluttered scene rather
-# than an archetype — a terse caption ("a laptop on a desk") produces a tidy studio
-# render while the real photo has cables and a coffee stain, and "tidy = fake"
-# is then learnable straight from the blurred overview.
+# The generator sees roughly the first 77 CLIP tokens and silently discards the
+# rest, so a caption's BUDGET matters as much as its density. Two consequences
+# shape this prompt:
 #
-# Capped at 60 words on purpose: SDXL's text encoders truncate at 77 tokens, so a
-# longer caption is not merely wasted, it is silently cut mid-clause.
-CAPTION_PROMPT = (
-    "Describe this photograph in one dense paragraph of at most 60 words. "
-    "Include the main subject, the setting, the lighting, and any background "
-    "clutter, incidental objects, or imperfections. Be specific and factual. "
-    "Do not mention photography equipment, image quality, or that it is a photo."
+#   * ~50 words, not 60. Qwen overshoots any word limit it is given, and an
+#     overshoot is not merely wasted — it is cut mid-clause by the text encoder.
+#   * clutter FIRST. Left to itself the model opens with the subject and saves
+#     background debris and imperfections for the final sentence, which is exactly
+#     the part that gets truncated. That detail is the whole point: a tidy render
+#     against a cluttered photograph makes "tidy = fake" readable straight from the
+#     blurred overview, which is the shortcut this pairing exists to remove.
+CAPTION_PROMPT_TEMPLATE = (
+    "Describe this photograph in at most {words} words, as a single sentence "
+    "fragment listing what is visible. Lead with the background clutter, "
+    "incidental objects, and imperfections; mention the main subject and the "
+    "lighting last. Be concrete and factual. Do not mention photography, image "
+    "quality, or that this is a photo. Do not use full sentences."
 )
 
 
@@ -179,7 +184,8 @@ def stage_caption(args) -> None:
                     obs.append({
                         "messages": [{"role": "user", "content": [
                             {"type": "image"},
-                            {"type": "text", "text": CAPTION_PROMPT},
+                            {"type": "text",
+                         "text": CAPTION_PROMPT_TEMPLATE.format(words=args.caption_words)},
                         ]}],
                         "images": [im.convert("RGB")],
                     })
@@ -216,6 +222,20 @@ def stage_generate(args) -> None:
         args.sdxl, torch_dtype=torch.float16, variant="fp16", use_safetensors=True
     ).to("cuda")
     pipe.set_progress_bar_config(disable=True)
+
+    # Audit before spending an hour: the encoder's own tokenizer is the only
+    # honest word-count, and a caption cut here loses its tail — which is where
+    # the clutter was deliberately put.
+    limit = getattr(pipe.tokenizer, "model_max_length", 77)
+    over = [len(pipe.tokenizer(r["caption"]).input_ids) for r in caps if r["caption"]]
+    n_cut = sum(1 for n in over if n > limit)
+    if over:
+        print(f"caption lengths: median {sorted(over)[len(over) // 2]} tokens, "
+              f"max {max(over)}, encoder limit {limit}")
+    if n_cut:
+        print(f"  WARNING: {n_cut}/{len(over)} captions exceed {limit} tokens and will "
+              f"be TRUNCATED — their tails are discarded. Re-caption with a smaller "
+              f"--caption-words if that is most of them.")
 
     made = 0
     for i, row in enumerate(caps):
@@ -311,7 +331,14 @@ def main() -> None:
                          "long edge carry zero label information by construction. 1024 "
                          "gives a 256px 4x4 cell at --overview-long-edge 140 (~7x zoom).")
     ap.add_argument("--batch", type=int, default=16)
-    ap.add_argument("--max-caption-tokens", type=int, default=120)
+    ap.add_argument("--caption-words", type=int, default=50,
+                    help="Word budget asked of the captioner. SDXL's text encoders "
+                         "truncate at 77 tokens (~55 words) and drop the remainder "
+                         "silently, so aim under that rather than at it.")
+    ap.add_argument("--max-caption-tokens", type=int, default=90,
+                    help="Generation cap. Sized just above --caption-words so an "
+                         "overshoot is visible as a cut caption rather than paid for "
+                         "in tokens the generator will discard anyway.")
     ap.add_argument("--steps", type=int, default=30)
     ap.add_argument("--guidance", type=float, default=5.5,
                     help="CFG. Deliberately lower than the usual 7.5+: high guidance "
