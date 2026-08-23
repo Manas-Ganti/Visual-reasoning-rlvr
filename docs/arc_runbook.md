@@ -462,6 +462,75 @@ GRPO are data-parallel across a full node (`gpu:h200:8`) and queue much slower �
 there are only six H200 nodes. GRPO's 48h exceeds the short QOS cap, so it must
 use `tc_h200_normal_base`.
 
+## 8. Token caps fail silently — check them first
+
+Two separate days were lost to truncation, in different components, with the same
+shape: **a cap does not raise an error, it quietly removes the end of something,
+and the damage surfaces as a symptom far from the cause.**
+
+| cap | where | value | what it cuts |
+|---|---|---|---|
+| CLIP text encoder | SDXL prompt | **77 tokens** (~55 words) | the tail of every caption |
+| `--caption-words` | `build_paired_synthetic` | 50 | advisory only — the VLM overshoots it |
+| `--max-caption-tokens` | `build_paired_synthetic` | 90 | the caption itself, mid-clause |
+| `--max-new-tokens` | distill · GRPO · eval · `common` | **640** | each assistant turn, mid-block |
+| `max_model_len` | vLLM engine | 16384 | prompt + completion together |
+| `limit_mm_per_prompt` | vLLM engine | `max_inspects + 4` | images per episode |
+
+### The two incidents
+
+**Captions (77 tokens).** Qwen was asked for 60 words and produced 90–110, and
+SDXL kept only the first ~55. Worse, the model's natural ordering puts the subject
+first and the incidental detail last, so truncation ate precisely the clutter the
+pairing existed to preserve. Symptom: nothing visible — it would have shown up
+much later as a floor above chance, blamed on the generator.
+Fix: ask for ~50 words as a fragment, **clutter first**, and audit at generate
+time with the pipeline's own tokenizer.
+
+**Turns (320 tokens).** Distillation rejected 80.4% of episodes as malformed
+against 0.2% wrong verdicts. A 320-token turn is ~240 words; turns that ran longer
+were cut mid-block, losing the trailing ACTION line, which makes the turn
+unparseable. One bad turn kills the whole episode, so ~28% per-turn truncation
+became ~80% episode loss. Symptom: an 18% keep rate, easily misread as "the
+substrate is hard" or "we need a bigger teacher".
+
+### How to spot it
+
+**Look at the maximum, not the mean.** Real length distributions have a tail; a
+truncated one stops dead:
+
+```
+turns 2325  median 191  p90 231  max 249     <- 320 tokens is ~240 words
+```
+
+p90 sat 18 words below the max. That is a distribution pressed against a wall, not
+a natural one. Generic check for any generated text:
+
+```bash
+python -c "
+import json, statistics
+rows=[json.loads(l) for l in open('data/<ds>/sft_traces.jsonl')]
+lens=sorted(len(a.split()) for r in rows for a in r['actions'])
+print('n', len(lens), 'median', statistics.median(lens), 'p90', lens[int(.9*len(lens))], 'max', lens[-1])"
+```
+
+If `max` sits suspiciously near a cap and the gap to `p90` is small, you are being
+truncated — and note this only measures the survivors, so the real damage is
+always larger than it looks.
+
+### Caps must match across stages
+
+`eval/harness.py` used 640 while distillation, GRPO and the `common` rollout
+helpers used 320. A policy would have been cut off during training — earning zero
+reward for a limit it cannot perceive — and then measured without that handicap.
+That produces a flat training curve with no visible cause. All four are now 640.
+
+**Rule: when you change a generation budget, change it everywhere, and check
+`max_model_len` still covers the worst case.** Episodes accumulate context every
+turn (overview + one image per reveal + all prior text), so a longer per-turn
+budget eats into the 16384 ceiling — which is the next cap to hit, and it will
+fail just as quietly.
+
 ## Preflight (all cheap, all on the login node)
 
 ```bash
