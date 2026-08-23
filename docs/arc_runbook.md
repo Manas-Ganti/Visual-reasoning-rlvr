@@ -293,10 +293,21 @@ Both jobs pended a full day before any of this was understood.
   and fatal for a small gate probe: it can only be satisfied on a node where
   nobody else holds a byte, so the job can never backfill. **Always pass an
   explicit `--mem` on gate submissions.**
-* **`--qos=tc_h200_normal_short`** is the single biggest lever for a 30-minute
-  job: priority went 1330 → 2312 and the pend reason went `Priority` →
-  `Resources` (i.e. first in line). Check for an A100 equivalent before queueing
-  there.
+* **`--qos=tc_h200_normal_short`** is the single biggest lever: priority went
+  1330 → 2312 and the pend reason went `Priority` → `Resources` (first in line).
+  The name is misleading — it caps at a **full day** and has the *highest*
+  priority on the cluster:
+
+  | QOS | priority | MaxWall |
+  |---|---|---|
+  | `tc_h200_normal_short` | **2000** | 1-00:00:00 |
+  | `tc_h200_normal_base` | 1000 | 7-00:00:00 |
+  | `tc_h200_normal_long` | 500 | 14-00:00:00 |
+
+  So every stage except GRPO (48h) belongs in `short`: gates, captioning,
+  generation, distillation, SFT (12h), eval. Only GRPO needs `base`. Confirm the
+  A100 equivalents with `sacctmgr show qos format=name%28,priority,maxwall`
+  before queueing there.
 * **Do not fall back to `*_preemptable_q`.** `h200_normal_q` is `PriorityTier=16`
   with `PreemptMode=OFF`; `h200_preemptable_q` is tier 8 and evictable. With
   `PreemptType=preempt/partition_prio`, normal preempts preemptable — moving down
