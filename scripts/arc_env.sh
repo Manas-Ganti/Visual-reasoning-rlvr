@@ -156,12 +156,29 @@ export NCCL_IB_DISABLE=0
 #   ncclInternalError ... Bootstrap : no socket interface found
 # — and it fails AFTER every rank has loaded the model, so an 8-GPU allocation is
 # already spent. Probe, and fall back to NCCL's own detection rather than insisting.
-_nccl_if="${NCCL_SOCKET_IFNAME:-ib0}"
-if [ -e "/sys/class/net/$_nccl_if" ]; then
+# NCCL's bootstrap needs an interface that is UP and carries an IPv4 address.
+# Merely existing in /sys/class/net is not enough: ib0 is PRESENT but
+# address-less on the H200 nodes, so an existence check passes and NCCL still
+# reports "Bootstrap : no socket interface found" — after every rank has loaded
+# the model. Test for an address, and otherwise pick the first real interface
+# that has one.
+_nccl_pick() {
+  local want="$1" name
+  if [ -n "$want" ] && ip -o -4 addr show dev "$want" 2>/dev/null | grep -q ' inet '; then
+    echo "$want"; return 0
+  fi
+  for name in $(ip -o -4 addr show 2>/dev/null | awk '{print $2}' | sort -u); do
+    case "$name" in lo|docker*|virbr*|veth*|br-*|cni*|flannel*) continue ;; esac
+    echo "$name"; return 0
+  done
+  return 1
+}
+if _nccl_if="$(_nccl_pick "${NCCL_SOCKET_IFNAME:-ib0}")"; then
   export NCCL_SOCKET_IFNAME="$_nccl_if"
+  echo "[arc_env] NCCL_SOCKET_IFNAME=$NCCL_SOCKET_IFNAME"
 else
-  echo "[arc_env] NCCL_SOCKET_IFNAME=$_nccl_if not on $(hostname) — auto-detecting." \
-       "Present: $(ls /sys/class/net 2>/dev/null | tr '\n' ' ')"
+  echo "[arc_env] WARNING no IPv4 interface found on $(hostname); leaving NCCL to guess." \
+       "Devices: $(ls /sys/class/net 2>/dev/null | tr '\n' ' ')"
   unset NCCL_SOCKET_IFNAME
 fi
 unset _nccl_if

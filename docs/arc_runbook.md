@@ -337,8 +337,16 @@ nodes and not on `tc-xe*`. NCCL's **bootstrap is TCP even when InfiniBand carrie
 the data**, so a stale name is fatal — and it fails only after every rank has
 loaded its 62 GB of weights, roughly ten minutes into an 8-GPU allocation.
 
-`arc_env.sh` now probes `/sys/class/net/<name>` and falls back to NCCL's own
-detection, printing the interfaces that are actually present. To pin one
+**Existence is the wrong test.** The first fix checked `/sys/class/net/ib0` and
+passed — the device *is* present on `tc-xe003` — and NCCL failed identically. The
+interface has no IPv4 address, which is what bootstrap actually needs.
+`arc_env.sh` now requires an address (`ip -o -4 addr show dev <name>`) and
+otherwise picks the first real interface that has one, skipping `lo` and the
+virtual `docker*`/`veth*`/`virbr*` families. It prints its choice:
+
+```
+[arc_env] NCCL_SOCKET_IFNAME=<name>
+``` To pin one
 explicitly, pass `NCCL_SOCKET_IFNAME=<name>` on the submit line; to see what a
 node offers:
 
