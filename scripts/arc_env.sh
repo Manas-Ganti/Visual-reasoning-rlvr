@@ -150,8 +150,23 @@ export MASTER_PORT="${MASTER_PORT:-$((20000 + SLURM_JOB_ID % 20000))}"
 # fallback that otherwise silently halves multi-node bandwidth. Flip
 # NCCL_DEBUG=INFO when a multi-node job hangs at the first collective.
 export NCCL_IB_DISABLE=0
-export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-ib0}"
-export NCCL_ASYNC_ERROR_HANDLING=1
+# NCCL's BOOTSTRAP is TCP even when IB carries the data, and the interface name
+# differs between node types: ib0 exists on the A100 nodes, not on the H200
+# (tc-xe*) ones. A stale name fails as
+#   ncclInternalError ... Bootstrap : no socket interface found
+# — and it fails AFTER every rank has loaded the model, so an 8-GPU allocation is
+# already spent. Probe, and fall back to NCCL's own detection rather than insisting.
+_nccl_if="${NCCL_SOCKET_IFNAME:-ib0}"
+if [ -e "/sys/class/net/$_nccl_if" ]; then
+  export NCCL_SOCKET_IFNAME="$_nccl_if"
+else
+  echo "[arc_env] NCCL_SOCKET_IFNAME=$_nccl_if not on $(hostname) — auto-detecting." \
+       "Present: $(ls /sys/class/net 2>/dev/null | tr '\n' ' ')"
+  unset NCCL_SOCKET_IFNAME
+fi
+unset _nccl_if
+# Renamed in torch 2.x; the old name still works but warns on every rank.
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 # Intra-node NVLink topology is discovered automatically; P2P disable is only a
 # debugging crutch (export NCCL_P2P_DISABLE=1) — it costs a lot of throughput.

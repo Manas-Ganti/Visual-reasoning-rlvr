@@ -323,6 +323,34 @@ ungated and fully downloaded, so distillation, SFT, GRPO and the gates all load 
 with no token at all. A token is needed only to fetch a gated repo — here, FLUX
 for the held-out generator set, which is eval-only and not on the critical path.
 
+### NCCL: `ib0` is an A100 name, and the failure comes late
+
+Multi-GPU training on the H200 nodes died at DeepSpeed init with:
+
+```
+ncclInternalError: Internal check failed.
+Last error: Bootstrap : no socket interface found
+```
+
+`arc_env.sh` hardcoded `NCCL_SOCKET_IFNAME=ib0`. That interface exists on the A100
+nodes and not on `tc-xe*`. NCCL's **bootstrap is TCP even when InfiniBand carries
+the data**, so a stale name is fatal — and it fails only after every rank has
+loaded its 62 GB of weights, roughly ten minutes into an 8-GPU allocation.
+
+`arc_env.sh` now probes `/sys/class/net/<name>` and falls back to NCCL's own
+detection, printing the interfaces that are actually present. To pin one
+explicitly, pass `NCCL_SOCKET_IFNAME=<name>` on the submit line; to see what a
+node offers:
+
+```bash
+srun --jobid=<id> --overlap ls /sys/class/net
+```
+
+Same lesson as the conda env and the HF token: **a value that is right for one
+node type is silently wrong on another, and the cost is paid at the far end of a
+long queue wait.** Anything hardcoded in `arc_env.sh` that names hardware is
+suspect when moving between partitions.
+
 ### Terminal paste corruption
 
 The VS Code remote terminal leaks bracketed-paste markers, which silently
