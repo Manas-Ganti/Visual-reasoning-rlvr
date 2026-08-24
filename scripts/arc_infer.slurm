@@ -49,6 +49,9 @@ mkdir -p logs/slurm "logs/${VRR_DATASET:-genimage}"
 # point into the repo — resolve against the submit dir instead.
 source "${SLURM_SUBMIT_DIR:-$PWD}/scripts/arc_env.sh"
 
+trap arc_notify_finish EXIT
+arc_notify "<b>START</b> ${JOB:-eval} ${SLURM_JOB_ID:-?} · ${VRR_DATASET:-?} · ${SLURM_JOB_NODELIST:-?}"
+
 JOB="${JOB:-eval}"
 MODEL="${MODEL:-32b}"
 TP="${TP:-$GPUS_PER_NODE}"

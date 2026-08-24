@@ -44,6 +44,9 @@ set -euo pipefail
 mkdir -p logs/slurm "logs/${VRR_DATASET:-genimage}"
 source "${SLURM_SUBMIT_DIR:-$PWD}/scripts/arc_env.sh"
 
+trap arc_notify_finish EXIT
+arc_notify "<b>START</b> ${STAGE:-caption} ${SLURM_JOB_ID:-?} · ${VRR_DATASET:-?} · ${SLURM_JOB_NODELIST:-?}"
+
 STAGE="${STAGE:-caption}"
 DATASET="${DATASET:-$VRR_DATASET}"
 MODEL="${MODEL:-32b}"

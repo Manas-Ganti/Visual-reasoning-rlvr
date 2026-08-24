@@ -86,6 +86,77 @@ if [ -z "${WANDB_MODE:-}" ]; then
 fi
 echo "[arc_env] wandb mode=${WANDB_MODE} project=${WANDB_PROJECT} dir=${WANDB_DIR}"
 
+# ---- Telegram notifications (optional) ------------------------------------- #
+# Jobs here queue for hours and then hinge on one number — a gate AUC, a keep
+# rate, usable_groups. Email tells you a job ended; this sends the number and the
+# log itself, so a decision can be made from a phone instead of from a login node.
+#
+# Setup, once:
+#   1. message @BotFather on Telegram, /newbot, keep the token
+#   2. message your new bot once, then:
+#        curl -s "https://api.telegram.org/bot<TOKEN>/getUpdates" | grep -o '"chat":{"id":[-0-9]*'
+#   3. put BOTH in ~/.config/vrr/secrets.env (chmod 600, outside the repo — this
+#      file is already sourced above, and is where the W&B key lives):
+#        export TELEGRAM_BOT_TOKEN=123456:AA...
+#        export TELEGRAM_CHAT_ID=987654321
+#
+# Every function no-ops silently when those are unset, and never fails a job:
+# a notification problem must not take down a 12-hour run.
+
+_arc_tg_ready() {
+  [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]
+}
+
+_arc_html_escape() {
+  sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+}
+
+# arc_notify "<text>" — one message. HTML parse mode, so <pre> works.
+arc_notify() {
+  _arc_tg_ready || return 0
+  curl -s -m 15 -o /dev/null \
+    -d chat_id="$TELEGRAM_CHAT_ID" -d parse_mode=HTML \
+    --data-urlencode text="$1" \
+    "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" 2>/dev/null || true
+}
+
+# The job's own stdout path, straight from SLURM rather than reconstructed —
+# each launcher names its output differently.
+_arc_logfile() {
+  [ -n "${SLURM_JOB_ID:-}" ] || return 1
+  scontrol show job "$SLURM_JOB_ID" 2>/dev/null \
+    | tr ' ' '\n' | sed -n 's/^StdOut=//p' | head -1
+}
+
+# arc_notify_log "<caption>" — the tail inline (readable at a glance) plus the
+# whole file as a document (readable properly, and searchable, from anywhere).
+arc_notify_log() {
+  _arc_tg_ready || return 0
+  local log tail_txt
+  log="$(_arc_logfile)"
+  if [ -f "$log" ]; then
+    # cut long lines: progress bars are one enormous line and would eat the
+    # 4096-character message limit on their own.
+    tail_txt="$(tail -n 30 "$log" | cut -c1-180 | tail -c 3000 | _arc_html_escape)"
+    arc_notify "$1"$'\n'"<pre>${tail_txt}</pre>"
+    curl -s -m 120 -o /dev/null \
+      -F chat_id="$TELEGRAM_CHAT_ID" -F caption="$1" -F document=@"$log" \
+      "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" 2>/dev/null || true
+  else
+    arc_notify "$1"$'\n'"(stdout not found)"
+  fi
+}
+
+# Install as: trap arc_notify_finish EXIT  — fires on success AND failure, which
+# is the point: a job that dies at 03:00 should say so.
+arc_notify_finish() {
+  local rc=$?
+  local mark
+  [ "$rc" -eq 0 ] && mark="OK" || mark="FAILED rc=$rc"
+  arc_notify_log "<b>${mark}</b> ${SLURM_JOB_NAME:-job} ${SLURM_JOB_ID:-?} · ${VRR_DATASET:-?} · $(date -u '+%d %b %H:%M')Z"
+  return "$rc"
+}
+
 # ---- modules / python ----------------------------------------------------- #
 # ARC uses Lmod. Adjust the module names to what `module spider cuda` reports on
 # the cluster you land on; the conda env is expected to hold the requirements.txt

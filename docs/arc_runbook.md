@@ -647,6 +647,47 @@ turn (overview + one image per reveal + all prior text), so a longer per-turn
 budget eats into the 16384 ceiling — which is the next cap to hit, and it will
 fail just as quietly.
 
+## 9. Telegram notifications (optional)
+
+Jobs queue for hours and then hinge on one number — a gate AUC, a distillation
+keep rate, `usable_groups`. Email tells you a job ended. This sends the number
+*and the log*, so the next decision can be made from a phone.
+
+**Setup, once:**
+
+1. Message `@BotFather`, `/newbot`, keep the token.
+2. Message your new bot once (it cannot message you first), then read the chat id:
+   ```bash
+   curl -s "https://api.telegram.org/bot<TOKEN>/getUpdates" | grep -o '"chat":{"id":[-0-9]*'
+   ```
+3. Put both in `~/.config/vrr/secrets.env` — already sourced by `arc_env.sh`,
+   already where the W&B key lives, and outside the repo:
+   ```bash
+   export TELEGRAM_BOT_TOKEN=123456:AA...
+   export TELEGRAM_CHAT_ID=987654321
+   ```
+   `chmod 600` it. Never in a tracked file.
+
+**What you get**, on every launcher, with no flags:
+
+* a **START** line with stage, job id, dataset and node
+* on exit — success *or* failure — the last 30 lines inline, plus **the whole
+  stdout as a document**, which Telegram lets you read and search on a phone
+
+**Design constraints worth keeping if this is edited:**
+
+* Every function no-ops when the token or chat id is unset, and every `curl` ends
+  in `|| true`. A notification failure must never take down a 12-hour run.
+* `arc_notify_finish` captures `$?` on its first line and re-returns it, so the
+  trap cannot mask a job's real exit code.
+* Long lines are cut to 180 chars before the tail is taken: progress bars are one
+  enormous line and would consume Telegram's 4096-character message limit alone.
+* The stdout path comes from `scontrol show job`, not reconstructed — each
+  launcher names its output differently.
+
+Send an ad-hoc message from inside any job with `arc_notify "text"`, e.g. after a
+gate probe prints its AUC.
+
 ## Preflight (all cheap, all on the login node)
 
 ```bash

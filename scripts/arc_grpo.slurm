@@ -45,6 +45,9 @@ mkdir -p logs/slurm "logs/${VRR_DATASET:-genimage}"
 # point into the repo — resolve against the submit dir instead.
 source "${SLURM_SUBMIT_DIR:-$PWD}/scripts/arc_env.sh"
 
+trap arc_notify_finish EXIT
+arc_notify "<b>START</b> grpo ${SLURM_JOB_ID:-?} · ${VRR_DATASET:-?} · ${SLURM_JOB_NODELIST:-?}"
+
 MODEL="${MODEL:-32b}"
 SFT_CKPT="${SFT_CKPT:-checkpoints/${VRR_DATASET}/sft-qwen2.5-vl-32b}"
 DS="${DS:-configs/deepspeed_zero2.json}"
