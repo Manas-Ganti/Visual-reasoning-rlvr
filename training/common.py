@@ -829,6 +829,51 @@ def build_inputs(processor, obs, device):
     return processor(text=[text], images=obs["images"], return_tensors="pt", padding=True).to(device)
 
 
+# The trajectory format puts ACTION last, so a turn is finished the moment that
+# line is complete. Without a stop condition the model keeps generating to
+# max_new_tokens — and a 32B asked to continue past a finished turn does not sit
+# quietly: it apologises and regenerates the turn, repeatedly.
+#
+# Observed in GRPO rollouts: a well-reasoned two-turn episode followed by five
+# near-identical "### Turn 2 (Final Correction)" blocks, scoring -0.87 for
+# trailing noise the policy was given no way to avoid. Roughly two thirds of every
+# turn's token budget went to that, which is also two thirds of the step time.
+# Each alternative ends in \D — one character PAST the value — which is what
+# proves the value is finished. Matching "INSPECT 1" at the end of the buffer
+# would stop the turn on cell 1 when the model was about to write 12.
+_ACTION_DONE = re.compile(
+    r"ACTION:\s*(?:"
+    r"INSPECT\s+\d+\D"
+    r"|VERDICT\s+(?:AI|REAL)\b[^\n]*?confidence\s*=\s*[0-9]*\.?[0-9]+[^0-9.]"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _action_line_stopper(processor, prompt_len: int):
+    """StoppingCriteria that ends the turn once its ACTION line is complete.
+
+    Stops GENERATION rather than truncating text afterwards, so the token ids and
+    logprobs GRPO differentiates stay aligned with the text the reward scores.
+    Returns None when the transformers version does not expose StoppingCriteria,
+    in which case behaviour is unchanged.
+    """
+    try:
+        from transformers import StoppingCriteria, StoppingCriteriaList
+    except ImportError:
+        return None
+
+    class _Stop(StoppingCriteria):
+        def __call__(self, input_ids, scores, **kwargs) -> bool:
+            tail = input_ids[0, prompt_len:]
+            if tail.numel() < 8:          # nothing plausible yet; skip the decode
+                return False
+            text = processor.decode(tail, skip_special_tokens=True)
+            return bool(_ACTION_DONE.search(text))
+
+    return StoppingCriteriaList([_Stop()])
+
+
 class HFPolicy:
     """HF ``generate`` policy: one action per call, optional per-token logprobs.
 
@@ -883,6 +928,10 @@ class HFPolicy:
         }
         if sample:  # passing these under greedy decoding only earns warnings
             gen_kwargs.update(temperature=temperature, top_p=top_p)
+
+        stopper = _action_line_stopper(self.processor, inputs["input_ids"].shape[1])
+        if stopper is not None:
+            gen_kwargs["stopping_criteria"] = stopper
 
         with torch.no_grad():
             out = self.model.generate(
