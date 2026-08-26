@@ -60,6 +60,8 @@ _RE_REASONING = _field("REASONING")
 _RE_HYPOTHESIS = _field("HYPOTHESIS")
 _RE_BELIEF_FIELD = _field(r"BELIEF_UPDATE|BELIEF")
 
+# [\s]* spans the newline in "ACTION:\\nINSPECT 6" — after strip_emphasis the
+# asterisks are gone, but the line break the model puts after the label is not.
 _RE_ACTION_LINE = re.compile(r"ACTION\s*:?\s*(.+)", re.IGNORECASE)
 _RE_INSPECT = re.compile(r"\bINSPECT\b\s*\(?\s*(\d{1,2})\s*\)?", re.IGNORECASE)
 _RE_VERDICT = re.compile(r"\bVERDICT\b\s*:?\s*\(?\s*([A-Za-z]+)", re.IGNORECASE)
@@ -157,15 +159,36 @@ class TurnEntry:
         return self.action_type == VERDICT
 
 
+# Models label fields with markdown emphasis — "**ACTION:**" on one line and the
+# value on the next — far more often than the format spec's plain "ACTION: ...".
+# Every label regex here anchors on "LABEL:" followed by whitespace, so emphasis
+# breaks all of them at once: field boundaries stop matching, and the action line
+# captures "**" instead of "INSPECT 6". The turn then scores INVALID despite being
+# perfectly well reasoned.
+#
+# Strip the emphasis markers before parsing. Safe by construction: the reward
+# reads only structured fields (numeric P(fake), reconciliation direction,
+# verdict, confidence), never prose, so removing ** and __ cannot change a score
+# except by letting a field be found at all.
+_RE_EMPHASIS = re.compile(r"\*\*|__")
+
+
+def strip_emphasis(text: str) -> str:
+    return _RE_EMPHASIS.sub("", text or "")
+
+
 def parse_turn(text: str) -> TurnEntry:
     """Parse one completion into a :class:`TurnEntry`.
 
     Only the *last* ACTION line is honored, so a model that narrates a plan
     ("I will INSPECT then VERDICT") before committing is not misread.
     """
+    raw_text = text
+    text = strip_emphasis(text)
+
     recon_text = _search(_RE_RECONCILE, text)
     entry = TurnEntry(
-        raw=text,
+        raw=raw_text,
         observation=_search(_RE_OBSERVATION, text),
         reasoning=_search(_RE_REASONING, text),
         hypothesis=_search(_RE_HYPOTHESIS, text),

@@ -842,7 +842,7 @@ def build_inputs(processor, obs, device):
 # proves the value is finished. Matching "INSPECT 1" at the end of the buffer
 # would stop the turn on cell 1 when the model was about to write 12.
 _ACTION_DONE = re.compile(
-    r"ACTION:\s*(?:"
+    r"ACTION[\s:*_]*(?:"
     r"INSPECT\s+\d+\D"
     r"|VERDICT\s+(?:AI|REAL)\b[^\n]*?confidence\s*=\s*[0-9]*\.?[0-9]+[^0-9.]"
     r")",
