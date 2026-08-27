@@ -70,6 +70,19 @@ case "$JOB" in
       ${AUC:+--auc} \
       ${ADAPTER:+--adapter "$ADAPTER"} "$@"
     ;;
+  budget)
+    # The ceiling the AGENT faces, as a function of inspect budget. Budget 0 is
+    # the floor, so floor, ceiling and gap all come from one job on one set of
+    # images with one scorer. Run this BEFORE committing a substrate to training:
+    # ceiling_probe --condition full measures the whole image, which the agent
+    # never sees, and on synth1024 that gap was the entire story of GRPO run 1.
+    "$PY" tools/budget_probe.py \
+      --model "$MODEL" --backend vllm --tensor-parallel-size "$TP" \
+      --budgets "${BUDGETS:-0,2,4,6,8}" --limit "${LIMIT:-200}" \
+      --overview-long-edge "$OVERVIEW_LONG_EDGE" \
+      --reveal-size "${REVEAL_SIZE:-336}" \
+      ${AUC:+--auc} ${ADAPTER:+--adapter "$ADAPTER"} "$@"
+    ;;
   groupvar)
     "$PY" tools/group_variance_probe.py \
       --model "$MODEL" --backend vllm --tensor-parallel-size "$TP" \
@@ -110,7 +123,7 @@ case "$JOB" in
       --overview-long-edge "$OVERVIEW_LONG_EDGE" "$@"
     ;;
   *)
-    echo "JOB must be one of: ceiling | floor | groupvar | distill | eval | evidence" >&2
+    echo "JOB must be one of: ceiling | floor | budget | groupvar | distill | eval | evidence" >&2
     exit 2
     ;;
 esac
