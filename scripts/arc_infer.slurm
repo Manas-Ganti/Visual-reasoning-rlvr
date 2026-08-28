@@ -49,6 +49,11 @@ mkdir -p logs/slurm "logs/${VRR_DATASET:-genimage}"
 # point into the repo — resolve against the submit dir instead.
 source "${SLURM_SUBMIT_DIR:-$PWD}/scripts/arc_env.sh"
 
+# One launcher serves several stages, so a static #SBATCH --job-name makes
+# every one of them look identical in squeue. Directives cannot read env
+# vars, but a job may rename itself once it is running.
+scontrol update jobid="${SLURM_JOB_ID}" name="vrr-${JOB:-eval}" >/dev/null 2>&1 || true
+
 trap arc_notify_finish EXIT
 arc_notify "<b>START</b> ${JOB:-eval} ${SLURM_JOB_ID:-?} · ${VRR_DATASET:-?} · ${SLURM_JOB_NODELIST:-?}"
 
