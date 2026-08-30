@@ -107,6 +107,12 @@ def main() -> None:
           f"  reveal_size={args.reveal_size}  budgets={budgets}")
     print(f"  question: {question}")
 
+    # The engine's image cap is derived from --max-inspects (build_policy uses
+    # max_inspects + 4), and a prompt here carries the overview PLUS one crop per
+    # inspect. Size it for the largest budget or vLLM rejects the request:
+    #   "You set or defaulted to '{"image": 8}' ... but passed 9 image items"
+    args.max_inspects = max(budgets)
+
     policy = vllm_backend.build_policy(args, adapter=args.adapter)
     if args.auc and not hasattr(policy, "first_token_logprobs"):
         raise SystemExit("--auc needs first-token logprobs: use --backend vllm")
