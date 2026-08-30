@@ -4,6 +4,7 @@ import pytest
 
 from env.reward import (
     RewardConfig,
+    belief_brier_score,
     belief_coherence_score,
     compute_episode_reward,
     confident_wrong_penalty,
@@ -245,3 +246,84 @@ def test_reward_hacking_guard_incoherent_scores_low():
     faithful_total, _ = compute_episode_reward(faithful, REAL)
     incoherent_total, _ = compute_episode_reward(incoherent, REAL)
     assert faithful_total > incoherent_total
+
+
+# --------------------------------------------------------------------------- #
+# belief_brier — a proper scoring rule on the final P(fake)
+# --------------------------------------------------------------------------- #
+# GRPO run 1 stated ~0.95 confidence on essentially every episode while scoring
+# 53%, because nothing in the reward read the probability the agent had already
+# written down. These pin the properties that make that expensive.
+
+def _traj_with_belief(p_fake: float, verdict: str) -> Trajectory:
+    return traj_from_texts(
+        "OBSERVATION: a scene\nHYPOTHESIS: if AI, cell 6 warps\nACTION: INSPECT 6",
+        f"RECONCILIATION: CONFIRMED\nBELIEF_UPDATE: P(fake)={p_fake} because evidence\n"
+        f"ACTION: VERDICT {verdict} confidence=0.9",
+    )
+
+
+def test_brier_rewards_a_confident_correct_belief():
+    assert belief_brier_score(_traj_with_belief(1.0, AI), AI) == pytest.approx(1.0)
+
+
+def test_brier_punishes_a_confident_wrong_belief():
+    assert belief_brier_score(_traj_with_belief(1.0, AI), REAL) == pytest.approx(-1.0)
+
+
+def test_brier_gives_partial_credit_for_an_honest_hedge():
+    # 0.5 scores +0.5 either way — better than being confidently wrong, worse
+    # than being confidently right. That asymmetry is the whole point.
+    assert belief_brier_score(_traj_with_belief(0.5, AI), AI) == pytest.approx(0.5)
+    assert belief_brier_score(_traj_with_belief(0.5, REAL), REAL) == pytest.approx(0.5)
+
+
+def test_brier_hedge_beats_confident_wrong():
+    hedge = belief_brier_score(_traj_with_belief(0.5, REAL), AI)
+    loud = belief_brier_score(_traj_with_belief(0.02, REAL), AI)
+    assert hedge > loud
+
+
+def test_brier_is_zero_without_a_recorded_belief():
+    t = traj_from_texts("OBSERVATION: a scene\nACTION: VERDICT AI confidence=0.9")
+    assert belief_brier_score(t, AI) == 0.0
+
+
+def test_brier_appears_in_the_breakdown_and_the_sum_still_reconciles():
+    t = _traj_with_belief(0.9, AI)
+    total, b = compute_episode_reward(t, AI)
+    assert "belief_brier" in b
+    assert total == pytest.approx(sum(b.values()))
+
+
+# --------------------------------------------------------------------------- #
+# confident_wrong is asymmetric by verdict
+# --------------------------------------------------------------------------- #
+# Finding an artifact proves AI; finding none across cells that were never opened
+# proves very little. A wrong REAL is therefore the more culpable error.
+
+def test_wrong_real_costs_more_than_wrong_ai_at_equal_confidence():
+    cfg = RewardConfig()
+    wrong_real = confident_wrong_penalty(_traj_with_belief(0.1, REAL), AI, cfg)
+    wrong_ai = confident_wrong_penalty(_traj_with_belief(0.9, AI), REAL, cfg)
+    assert wrong_real < wrong_ai < 0
+    assert wrong_real == pytest.approx(wrong_ai * cfg.c_confident_wrong_real_mult)
+
+
+def test_correct_verdicts_still_pay_no_confidence_penalty():
+    cfg = RewardConfig()
+    assert confident_wrong_penalty(_traj_with_belief(0.9, AI), AI, cfg) == 0.0
+    assert confident_wrong_penalty(_traj_with_belief(0.1, REAL), REAL, cfg) == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# prediction_tracking is retired
+# --------------------------------------------------------------------------- #
+
+def test_always_confirmed_no_longer_earns_anything():
+    """Run 1 wrote CONFIRMED on 91% of reconciliations. The scorer still exists
+    for the eval breakdown, but its weight is 0 so it cannot be farmed."""
+    assert RewardConfig().w_prediction_tracking == 0.0
+    t = _traj_with_belief(0.9, AI)
+    _, b = compute_episode_reward(t, AI)
+    assert b["prediction_tracking"] == 0.0

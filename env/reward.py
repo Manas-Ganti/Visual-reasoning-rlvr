@@ -17,13 +17,23 @@ weights:
   contradicting it. These are ungated (they apply even to wrong answers) on
   purpose: they shape *how* the agent reasons. They are deliberately weaker than
   ``verdict_correct`` so they can never make a confidently-wrong episode look good.
-* ``prediction_tracking`` is intentionally SOFT (small weight): it is the most
-  game-able term (an agent can just always write "CONFIRMED"), so it only nudges.
-  The honest cross-check on whether predictions land on real artifacts lives in
-  the eval evidence slice (GradCAM + human-verified cells), never in this hot loop.
+* ``belief_brier`` scores the FINAL P(fake) with a proper scoring rule. The agent
+  writes a calibrated probability every turn and, before this term existed, the
+  reward read only the binary verdict — so honest uncertainty paid nothing. GRPO
+  run 1 stated ~0.95 confidence on essentially every episode while scoring 53%.
+  Being proper, the term cannot be gamed by overstating: it is maximised by
+  reporting one's actual belief.
+* ``prediction_tracking`` is now weighted **0.0**. It paid for the fraction of
+  reconciliations marked CONFIRMED, which an agent maxes by always writing
+  CONFIRMED — and run 1 did exactly that, 91% of the time, mostly while the
+  belief moved the other way. The honest cross-check on whether predictions land
+  on real artifacts lives in the eval evidence slice, never in this hot loop.
 * ``action_cost`` makes exhaustive looking unprofitable, forcing hypothesis-driven
   inspection. ``confident_wrong`` penalizes miscalibration so the agent learns to
-  hedge on genuinely indistinguishable images instead of guessing loudly.
+  hedge on genuinely indistinguishable images instead of guessing loudly, and is
+  scaled up for a wrong REAL: finding an artifact proves AI, whereas finding none
+  across cells that were never opened proves very little, so the two verdicts are
+  not equally defensible on the same evidence.
 
 The documented failure history that motivated this shape lives in
 ``results/reward_failure_history.md``.
@@ -33,7 +43,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from env.trajectory import AI, CONFIRMED, REFUTED, UNCLEAR, Trajectory
+from env.trajectory import AI, CONFIRMED, REAL, REFUTED, UNCLEAR, Trajectory
 
 _EPS = 0.02  # belief movements smaller than this count as "held steady"
 
@@ -45,13 +55,24 @@ class RewardConfig:
 
     # Positive terms
     w_correct: float = 1.0             # ±this on a right / wrong verdict
+    w_belief_brier: float = 0.40       # proper scoring rule on the FINAL P(fake)
     w_belief_coherence: float = 0.30   # beliefs move sensibly given reconciliations
     w_verdict_consistency: float = 0.30  # final call follows accumulated evidence
-    w_prediction_tracking: float = 0.10  # SOFT: fraction of hypotheses confirmed
+    # Was 0.10, now off. It pays for the *fraction* of reconciliations marked
+    # CONFIRMED, and its own docstring admits always-CONFIRMED maxes it. Run 1
+    # took the bait: 91% of reconciliations were CONFIRMED, most of them while
+    # the belief moved the other way. It was paying for a verbal tic.
+    w_prediction_tracking: float = 0.0
 
     # Cost / penalty terms (subtracted)
     c_action: float = 0.05             # per inspect — budget pressure
     c_confident_wrong: float = 0.50    # scaled by stated confidence on a wrong call
+    # Evidence here is asymmetric: finding an artifact PROVES AI, while finding
+    # none across a fraction of the grid proves very little. A confident REAL is
+    # therefore a weaker claim than a confident AI and should cost more when it
+    # is wrong. Run 1 answered REAL on 79% of episodes at a mean confidence of
+    # 0.95 while scoring 53% — this is the term meant to make that expensive.
+    c_confident_wrong_real_mult: float = 1.5
     no_answer_penalty: float = 1.00    # ran out of budget without committing
 
     # Confidence assumed when a verdict omits one (keeps confident_wrong defined).
@@ -136,6 +157,27 @@ def prediction_tracking_score(traj: Trajectory) -> float:
     return sum(r == CONFIRMED for r in recons) / len(recons)
 
 
+def belief_brier_score(traj: Trajectory, ground_truth: str) -> float:
+    """[-1, 1]: a proper scoring rule on the FINAL P(fake).
+
+    The policy writes a calibrated probability every turn and the rest of the
+    reward ignores it, scoring only the binary verdict. That leaves honest
+    uncertainty entirely unpaid: in run 1 the policy stated ~0.95 confidence on
+    essentially every episode while scoring 53%, and no term made that expensive.
+
+    Scored as ``1 - 2(p - y)^2`` so a confident correct call earns +1, a hedge at
+    0.5 earns +0.5, and a confident wrong call earns -1. Being a proper scoring
+    rule, it is maximised by reporting one's true belief — there is no way to
+    profit by overstating. Returns 0.0 when no belief was recorded; there is
+    nothing to score, and absence should not be rewarded.
+    """
+    p = traj.final_belief()
+    if p is None:
+        return 0.0
+    y = 1.0 if ground_truth == AI else 0.0
+    return 1.0 - 2.0 * (p - y) ** 2
+
+
 def confident_wrong_penalty(traj: Trajectory, ground_truth: str, cfg: RewardConfig) -> float:
     """<=0: a wrong verdict is penalized in proportion to the confidence it was
     stated with, so the agent learns to hedge on indistinguishable images instead
@@ -145,7 +187,11 @@ def confident_wrong_penalty(traj: Trajectory, ground_truth: str, cfg: RewardConf
     conf = traj.final_confidence
     if conf is None:
         conf = cfg.default_confidence
-    return -cfg.c_confident_wrong * conf
+    # A wrong REAL is the more culpable error: it was asserted on the absence of
+    # evidence across cells that were never opened, whereas a wrong AI at least
+    # rested on something the agent claims to have seen.
+    mult = cfg.c_confident_wrong_real_mult if traj.final_verdict == REAL else 1.0
+    return -cfg.c_confident_wrong * conf * mult
 
 
 # --------------------------------------------------------------------------- #
@@ -170,6 +216,7 @@ def compute_episode_reward(
     else:
         b["verdict_correct"] = 0.0
 
+    b["belief_brier"] = cfg.w_belief_brier * belief_brier_score(traj, ground_truth)
     b["belief_coherence"] = cfg.w_belief_coherence * belief_coherence_score(traj)
     b["verdict_consistency"] = cfg.w_verdict_consistency * verdict_consistency_score(traj)
     b["prediction_tracking"] = cfg.w_prediction_tracking * prediction_tracking_score(traj)

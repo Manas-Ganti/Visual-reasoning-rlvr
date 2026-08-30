@@ -95,6 +95,48 @@ class VisionSFTCollator:
         return batch
 
 
+def balance_traces(traces: list[dict], env, target_ai: float | None) -> list[dict]:
+    """Oversample one class of traces until AI reaches ``target_ai`` of the set.
+
+    This is the ONLY stage that can move the policy's prior. GRPO computes its
+    advantage within a group of rollouts on ONE image, so it pushes toward AI on
+    AI images and toward REAL on real ones, and across balanced data those
+    pressures cancel: run 1 moved the marginal AI-rate by 0.4 points in 600 steps
+    (21.2% -> 21.6%) while genuinely improving discrimination. Whatever prior SFT
+    hands over is the prior GRPO will still have at the end.
+
+    Oversampling (repeating traces) rather than downsampling keeps every
+    demonstration; the traces are expensive and there are only ~1.4k of them.
+    ``target_ai=None`` disables this and leaves the set untouched.
+    """
+    if not target_ai:
+        return traces
+    label_of = {}
+    for i, r in enumerate(env.records):
+        label_of[i] = int(r.get("label", 0))
+    ai = [t for t in traces if label_of.get(t.get("index"), 0) == 1]
+    real = [t for t in traces if label_of.get(t.get("index"), 0) == 0]
+    if not ai or not real:
+        common.rank0_print(f"[balance] one class is empty (ai={len(ai)} real={len(real)}) "
+                           f"— leaving traces untouched")
+        return traces
+
+    # Keep the larger side whole and repeat the smaller until the ratio is met.
+    if target_ai >= 0.5:
+        want_ai = int(round(len(real) * target_ai / (1.0 - target_ai)))
+        ai = (ai * (want_ai // len(ai) + 1))[:max(want_ai, len(ai))]
+    else:
+        want_real = int(round(len(ai) * (1.0 - target_ai) / target_ai))
+        real = (real * (want_real // len(real) + 1))[:max(want_real, len(real))]
+    out = ai + real
+    common.rank0_print(
+        f"[balance] traces {len(traces)} -> {len(out)}  "
+        f"AI {len(ai)} ({len(ai) / len(out):.1%}, was "
+        f"{sum(label_of.get(t.get('index'), 0) == 1 for t in traces) / len(traces):.1%})  "
+        f"REAL {len(real)}")
+    return out
+
+
 def default_output_dir(model_name: str, dataset: str | None = None) -> str:
     return common.checkpoint_dir("sft", model_name, dataset)
 
@@ -107,6 +149,12 @@ def main():
                     help="Dataset namespace for manifest/traces/checkpoints/logs.")
     ap.add_argument("--manifest", default=None)
     ap.add_argument("--traces", default=None)
+    ap.add_argument("--target-ai-frac", type=float, default=None, metavar="F",
+                    help="Oversample traces until AI is F of the set (e.g. 0.65). The "
+                         "policy's prior is set here and nowhere else: GRPO's within-group "
+                         "advantage cancels across balanced data and cannot move it. Run 1 "
+                         "answered REAL on 79%% of episodes and 600 GRPO steps changed that "
+                         "by 0.4 points. Omit to leave the traces as distilled.")
     ap.add_argument("--output-dir", default=None, help="Defaults to checkpoints/sft-<model>.")
     ap.add_argument("--max-inspects", type=int, default=4)
     ap.add_argument("--overview-long-edge", type=int, default=140,
@@ -154,6 +202,7 @@ def main():
                            shuffle=False, dataset=args.dataset,
                            overview_long_edge=args.overview_long_edge)
     traces = load_traces(args.traces)
+    traces = balance_traces(traces, env, args.target_ai_frac)
     conversations = [c for t in traces if (c := replay_to_conversation(env, t))]
     common.rank0_print(f"Loaded {len(traces)} traces; {len(conversations)} replayed cleanly.")
 

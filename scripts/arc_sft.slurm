@@ -47,4 +47,5 @@ arc_torchrun training/sft.py \
   --grad-accum "$GRAD_ACCUM" \
   --wandb-project "$WANDB_PROJECT" \
   --overview-long-edge "$OVERVIEW_LONG_EDGE" \
+  ${TARGET_AI_FRAC:+--target-ai-frac "$TARGET_AI_FRAC"} \
   "$@"
