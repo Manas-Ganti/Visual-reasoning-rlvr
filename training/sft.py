@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -95,25 +96,28 @@ class VisionSFTCollator:
         return batch
 
 
-def balance_traces(traces: list[dict], env, target_ai: float | None) -> list[dict]:
-    """Oversample one class of traces until AI reaches ``target_ai`` of the set.
+def balance_traces(traces: list[dict], env, target_ai: float | None,
+                   seed: int = 0) -> list[dict]:
+    """Resample traces to a target AI fraction, keeping the SET THE SAME SIZE.
 
     This is the ONLY stage that can move the policy's prior. GRPO computes its
     advantage within a group of rollouts on ONE image, so it pushes toward AI on
     AI images and toward REAL on real ones, and across balanced data those
-    pressures cancel: run 1 moved the marginal AI-rate by 0.4 points in 600 steps
-    (21.2% -> 21.6%) while genuinely improving discrimination. Whatever prior SFT
-    hands over is the prior GRPO will still have at the end.
+    pressures cancel: run 1 moved the marginal AI-rate 21.2% -> 21.6% in 600
+    steps while genuinely improving discrimination. Whatever prior SFT hands
+    over is the prior GRPO still has at the end.
 
-    Oversampling (repeating traces) rather than downsampling keeps every
-    demonstration; the traces are expensive and there are only ~1.4k of them.
-    ``target_ai=None`` disables this and leaves the set untouched.
+    Size is held constant on purpose. The first version oversampled the minority
+    class, which grew 1,444 traces to ~2,100 — and every trace carries an
+    overview plus several 1024px reveals, so the image column crossed Arrow's
+    2 GB per-column offset limit and Dataset.from_list died with
+    "offset overflow while concatenating arrays". Holding the total fixed also
+    keeps the step count and epoch length comparable to previous runs, so the
+    class ratio is the only variable that changed.
     """
     if not target_ai:
         return traces
-    label_of = {}
-    for i, r in enumerate(env.records):
-        label_of[i] = int(r.get("label", 0))
+    label_of = {i: int(r.get("label", 0)) for i, r in enumerate(env.records)}
     ai = [t for t in traces if label_of.get(t.get("index"), 0) == 1]
     real = [t for t in traces if label_of.get(t.get("index"), 0) == 0]
     if not ai or not real:
@@ -121,19 +125,24 @@ def balance_traces(traces: list[dict], env, target_ai: float | None) -> list[dic
                            f"— leaving traces untouched")
         return traces
 
-    # Keep the larger side whole and repeat the smaller until the ratio is met.
-    if target_ai >= 0.5:
-        want_ai = int(round(len(real) * target_ai / (1.0 - target_ai)))
-        ai = (ai * (want_ai // len(ai) + 1))[:max(want_ai, len(ai))]
-    else:
-        want_real = int(round(len(ai) * (1.0 - target_ai) / target_ai))
-        real = (real * (want_real // len(real) + 1))[:max(want_real, len(real))]
-    out = ai + real
+    was = len(ai) / len(traces)
+    rng = random.Random(seed)
+    n = len(traces)
+    want_ai = min(max(int(round(n * target_ai)), 1), n - 1)
+    want_real = n - want_ai
+
+    def take(pool: list[dict], k: int) -> list[dict]:
+        # Sample without replacement where possible; top up by repetition only
+        # when the pool is genuinely too small for the requested share.
+        if k <= len(pool):
+            return rng.sample(pool, k)
+        return pool + [rng.choice(pool) for _ in range(k - len(pool))]
+
+    out = take(ai, want_ai) + take(real, want_real)
+    rng.shuffle(out)
     common.rank0_print(
-        f"[balance] traces {len(traces)} -> {len(out)}  "
-        f"AI {len(ai)} ({len(ai) / len(out):.1%}, was "
-        f"{sum(label_of.get(t.get('index'), 0) == 1 for t in traces) / len(traces):.1%})  "
-        f"REAL {len(real)}")
+        f"[balance] {len(traces)} traces -> {len(out)} (size held constant)  "
+        f"AI {want_ai} ({want_ai / len(out):.1%}, was {was:.1%})  REAL {want_real}")
     return out
 
 
