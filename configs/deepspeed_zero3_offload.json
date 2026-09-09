@@ -2,9 +2,14 @@
   "_comment": [
     "ZeRO-3 + CPU offload of parameters and optimizer state. The fallback when the",
     "job is VRAM-bound rather than time-bound — e.g. 72B on fewer than 8 A100-80s,",
-    "or a full finetune. Expect a large slowdown; ARC nodes have plenty of host RAM,",\n    "",\n    "WARNING on ARC: offload_optimizer forces DeepSpeedCPUAdam, which JIT-compiles",\n    "against nvcc and dies with MissingCUDAException because the compute nodes do",\n    "not set CUDA_HOME. For LoRA use deepspeed_zero3_offload_param.json instead —",\n    "the adapter optimizer is tiny and only the parameters need to leave the GPU.",
+    "or a full finetune. Expect a large slowdown; ARC nodes have plenty of host RAM,",
     "so this trades wall-clock for feasibility. Needs pinned host memory: request",
-    "generous --mem in the SLURM script."
+    "generous --mem in the SLURM script.",
+    "",
+    "WARNING on ARC: offload_optimizer forces DeepSpeedCPUAdam, which JIT-compiles",
+    "against nvcc and dies with MissingCUDAException because the compute nodes do",
+    "not set CUDA_HOME. For LoRA use deepspeed_zero3_offload_param.json instead —",
+    "the adapter optimizer is tiny and only the parameters need to leave the GPU."
   ],
   "bf16": { "enabled": "auto" },
   "zero_optimization": {
