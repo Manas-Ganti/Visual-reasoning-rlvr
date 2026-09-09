@@ -1,0 +1,39 @@
+{
+  "_comment": [
+    "ZeRO-3 with CPU offload of PARAMETERS ONLY — optimizer state stays on GPU.",
+    "",
+    "The full offload config (deepspeed_zero3_offload.json) offloads the optimizer",
+    "too, which forces DeepSpeedCPUAdam. That is a JIT-compiled CUDA extension and",
+    "needs nvcc via CUDA_HOME, which ARC compute nodes do not expose:",
+    "  MissingCUDAException: CUDA_HOME does not exist, unable to compile CUDA op(s)",
+    "The optional fused ops merely warn and fall back; CPUAdam is mandatory for",
+    "optimizer offload, so it is fatal.",
+    "",
+    "With LoRA there is no reason to offload the optimizer anyway: only the adapter",
+    "is trainable, so its Adam state is a few hundred MB. It is the ~66GB of frozen",
+    "PARAMETERS that must leave the GPU, and offload_param alone does that.",
+    "",
+    "zero_force_ds_cpu_optimizer=false is belt-and-braces: it stops DeepSpeed",
+    "substituting its CPU Adam even if something else in the stack asks for it."
+  ],
+  "bf16": { "enabled": "auto" },
+  "zero_force_ds_cpu_optimizer": false,
+  "zero_optimization": {
+    "stage": 3,
+    "offload_param": { "device": "cpu", "pin_memory": true },
+    "overlap_comm": true,
+    "contiguous_gradients": true,
+    "reduce_bucket_size": "auto",
+    "stage3_prefetch_bucket_size": "auto",
+    "stage3_param_persistence_threshold": "auto",
+    "stage3_max_live_parameters": 1e9,
+    "stage3_max_reuse_distance": 1e9,
+    "stage3_gather_16bit_weights_on_model_save": true
+  },
+  "gradient_accumulation_steps": "auto",
+  "gradient_clipping": "auto",
+  "train_batch_size": "auto",
+  "train_micro_batch_size_per_gpu": "auto",
+  "steps_per_print": 50,
+  "wall_clock_breakdown": false
+}
