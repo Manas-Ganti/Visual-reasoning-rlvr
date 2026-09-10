@@ -8,7 +8,7 @@ live in [`arc_runbook.md`](arc_runbook.md); results in
 
 | | |
 |---|---|
-| SLURM account | `ece-6474-spring2026` (always pass `--account`; the `ARC_ACCOUNT` var in `arc_env.sh` is dead) |
+| SLURM account | `ece-6524-spring2026` (always pass `--account`; the `ARC_ACCOUNT` var in `arc_env.sh` is dead) |
 | mail | `--mail-user=manasganti@vt.edu` (`--mail-type` is already in the launchers) |
 | branch | `rebuild/visual-reasoning-rlvr` |
 | remote | `github.com/Manas-Ganti/Visual-reasoning-rlvr` |
