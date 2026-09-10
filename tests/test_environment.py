@@ -226,3 +226,68 @@ def test_inspect_reveal_is_unaffected_by_overview_setting(textured_manifest):
         obs, *_ = env.step("OBSERVATION: x\nREASONING: y\nHYPOTHESIS: z\nACTION: INSPECT 6")
         crops.append(np.asarray(obs["images"][-1].convert("L"), dtype=float))
     assert np.array_equal(crops[0], crops[1])
+
+
+# --------------------------------------------------------------------------- #
+# Final-turn warning
+# --------------------------------------------------------------------------- #
+# Gate 2 on the cycle-2 SFT checkpoint answered only 68.8% of episodes at budget
+# 6. The env told the agent when its inspect BUDGET was gone but never that its
+# TURNS were nearly gone, so a last response spent on a repeated cell or a
+# malformed action ended the episode with no verdict and the -1.00 no-answer
+# penalty. These lock in that the warning arrives, arrives exactly once, and
+# never displaces the feedback that was already there.
+
+def _last_user_text(env) -> str:
+    for m in reversed(env.state["messages"]):
+        if m["role"] == "user":
+            return " ".join(p.get("text", "") for p in m["content"])
+    return ""
+
+
+def _drive_to_turn(env, n):
+    """Spend n turns on invalid actions, which burn turns but never budget."""
+    for _ in range(n):
+        env.step("no action line here")
+
+
+def test_final_turn_warning_on_last_response(manifest):
+    env = InvestigationEnv(manifest_path=manifest, max_inspects=4, seed=0, shuffle=False)
+    env.reset()
+    # max_turns == 7; after turn 6 the agent has exactly one response left.
+    _drive_to_turn(env, env.max_turns - 1)
+    assert "LAST RESPONSE" in _last_user_text(env)
+
+
+def test_no_warning_before_the_last_turn(manifest):
+    env = InvestigationEnv(manifest_path=manifest, max_inspects=4, seed=0, shuffle=False)
+    env.reset()
+    _drive_to_turn(env, env.max_turns - 2)
+    assert "LAST RESPONSE" not in _last_user_text(env)
+
+
+def test_warning_does_not_add_a_second_user_message(manifest):
+    """Consecutive user turns break the chat template; the warning must merge."""
+    env = InvestigationEnv(manifest_path=manifest, max_inspects=4, seed=0, shuffle=False)
+    env.reset()
+    _drive_to_turn(env, env.max_turns - 1)
+    roles = [m["role"] for m in env.state["messages"]]
+    assert not any(a == b == "user" for a, b in zip(roles, roles[1:]))
+
+
+def test_warning_preserves_existing_feedback(manifest):
+    """The invalid-action guidance must survive the warning being appended."""
+    env = InvestigationEnv(manifest_path=manifest, max_inspects=4, seed=0, shuffle=False)
+    env.reset()
+    _drive_to_turn(env, env.max_turns - 1)
+    text = _last_user_text(env)
+    assert "no valid ACTION line" in text and "LAST RESPONSE" in text
+
+
+def test_answering_on_the_final_turn_still_terminates(manifest):
+    env = InvestigationEnv(manifest_path=manifest, max_inspects=4, seed=0, shuffle=False)
+    env.reset()
+    _drive_to_turn(env, env.max_turns - 1)
+    _, reward, terminated, truncated, _ = env.step("ACTION: VERDICT AI confidence=0.6")
+    assert terminated and not truncated
+    assert env.state["trajectory"].answered

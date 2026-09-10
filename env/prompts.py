@@ -241,4 +241,10 @@ REPEATED_INSPECT_FEEDBACK = (
     "different cell or commit a verdict."
 )
 
+FINAL_TURN_TEXT = (
+    "THIS IS YOUR LAST RESPONSE. The investigation ends after it, whether or not "
+    "you have answered. Commit now: ACTION: VERDICT <AI|REAL> confidence=<0.0-1.0>. "
+    "An uncertain verdict scores far better than none."
+)
+
 VERDICT_ACK_TEXT = "Verdict recorded: {verdict} (confidence {confidence}). Investigation complete."

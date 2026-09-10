@@ -246,8 +246,16 @@ class InvestigationEnv(gym.Env):
         if not terminated:
             if s["turns"] >= self.max_turns:
                 truncated = True
-            elif s["inspects_used"] >= self.max_inspects and entry.action_type != INVALID:
-                self._add_user(prompts.BUDGET_EXHAUSTED_TEXT)
+            else:
+                if s["inspects_used"] >= self.max_inspects and entry.action_type != INVALID:
+                    self._add_user(prompts.BUDGET_EXHAUSTED_TEXT)
+                # The agent was told when its BUDGET ran out but never that its
+                # TURNS were about to, so it could spend its last response on a
+                # repeated cell or a malformed action and be truncated without
+                # ever committing — a -1.00 no-answer on an otherwise sound
+                # episode. Gate 2 measured a 0.688 answer rate at budget 6.
+                if s["turns"] >= self.max_turns - 1:
+                    self._append_to_last_user(prompts.FINAL_TURN_TEXT)
 
         reward = 0.0
         if terminated or truncated:
@@ -266,6 +274,21 @@ class InvestigationEnv(gym.Env):
     # ------------------------------------------------------------------ #
     def _add_user(self, text: str):
         self.state["messages"].append({"role": "user", "content": [{"type": "text", "text": text}]})
+
+    def _append_to_last_user(self, text: str):
+        """Append to the trailing user message instead of adding another one.
+
+        Two consecutive user turns are not what the chat template expects, and
+        the final-turn warning has to reach the model whichever feedback branch
+        already fired this step (budget-exhausted, repeated cell, invalid).
+        """
+        msgs = self.state["messages"]
+        if msgs and msgs[-1]["role"] == "user":
+            for part in reversed(msgs[-1]["content"]):
+                if part.get("type") == "text":
+                    part["text"] = part["text"].rstrip() + " " + text
+                    return
+        self._add_user(text)
 
     def _ground_truth(self) -> str:
         return label_to_verdict(self.state["record"]["label"])
