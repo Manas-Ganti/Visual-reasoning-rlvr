@@ -52,8 +52,33 @@ IP, which is a silent 10-minute failure.
 | `a100_normal_q` | 14 · `tc-dgx[001-010]`,`tc-gpu[001-004]` · 80 GB | `tc_a100_normal_short` (1500 / 1 day) | `tc_a100_normal_base` (1000 / 7 d) |
 
 "short" is a **full day** and the highest priority — use it for everything under
-24 h. A100s are 80 GB, so 32B training there needs
-`DS=configs/deepspeed_zero3.json` (ZeRO-2 replicates 66 GB per GPU and OOMs).
+24 h. A100s are 80 GB, so 32B training there needs offload — but use
+`DS=configs/deepspeed_zero3_offload_param.json`, NOT `zero3.json` or the full
+`zero3_offload.json`. ZeRO-3 alone still OOMs (every rank materialises the model
+during `from_pretrained`, before DeepSpeed partitions anything), and the full
+offload config forces `DeepSpeedCPUAdam`, which needs an `nvcc` the compute nodes
+do not expose. Parameter-only offload ran 32B SFT on 2×A100 in 3.9 h; pass
+`--mem=300G` for the pinned host memory.
+
+## `VAR=x sbatch` never errors on a name the launcher does not read
+
+The launchers only see variables they explicitly reference. Passing one they do
+not — `MAX_INSPECTS=6` to `arc_grpo.slurm` before it was wired — is accepted
+silently and dropped, and the job runs on the Python default instead. Nothing
+warns. Before relying on a variable, confirm the launcher reads it:
+
+```bash
+grep -n 'MAX_INSPECTS' scripts/arc_grpo.slurm
+```
+
+Passthrough flags after the script name (`... scripts/arc_grpo.slurm
+--max-inspects 6`) reach `argparse` directly and fail loudly on a typo, so they
+are the safer form when in doubt.
+
+Related: `.slurm` files are copied to the SLURM spool at SUBMIT time, so editing
+one does not affect an already-queued job — cancel and resubmit. Python files
+and `arc_env.sh` are read at RUN time and a `git pull` under a pending job does
+take effect.
 
 ## Command shape
 
@@ -63,7 +88,7 @@ Python entry point.
 ```bash
 HF_HOME=... WANDB_DIR=... CONDA_ENV=... OVERVIEW_LONG_EDGE=56 VRR_DATASET=synth1024 \
 JOB=<stage> MODEL=32b TP=1 \
-sbatch --account=ece-6474-spring2026 --partition=h200_normal_q \
+sbatch --account=ece-6524-spring2026 --partition=h200_normal_q \
        --qos=tc_h200_normal_short --gres=gpu:h200:1 --cpus-per-task=8 --mem=96G \
        --time=00:30:00 --mail-user=manasganti@vt.edu \
        scripts/arc_infer.slurm --some-python-flag
