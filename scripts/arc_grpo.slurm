@@ -2,6 +2,7 @@
 # Stage 2 — GRPO on ARC. Defaults: two 8-GPU nodes, 32B, ZeRO-2.
 #
 #   SFT_CKPT=checkpoints/sft-qwen2.5-vl-32b sbatch scripts/arc_grpo.slurm
+#   MAX_INSPECTS=6 SFT_CKPT=... sbatch scripts/arc_grpo.slurm   # match the gate
 #   sbatch --nodes=1 scripts/arc_grpo.slurm          # single node, ~2× the wall clock
 #
 # ZeRO-2 on purpose: every rollout turn calls generate(), and under ZeRO-3 that
@@ -53,6 +54,12 @@ SFT_CKPT="${SFT_CKPT:-checkpoints/${VRR_DATASET}/sft-qwen2.5-vl-32b}"
 DS="${DS:-configs/deepspeed_zero2.json}"
 NUM_GEN="${NUM_GEN:-8}"                            # GRPO group size G
 DEGRADATION="${DEGRADATION:-clean}"
+# Must match the budget the gates were measured at: group_variance_probe is run
+# with --max-inspects, and a policy that clears the gate at 6 has not been shown
+# to clear it at grpo.py's default of 4. Unset here once already: the launcher
+# accepted MAX_INSPECTS=6 on the command line and silently ignored it.
+MAX_INSPECTS="${MAX_INSPECTS:-}"
+GRAD_ACCUM="${GRAD_ACCUM:-}"                       # default: one GRPO group/step
 
 arc_torchrun training/grpo.py \
   --model "$MODEL" \
@@ -62,4 +69,6 @@ arc_torchrun training/grpo.py \
   --degradation "$DEGRADATION" \
   --wandb-project "$WANDB_PROJECT" \
   --overview-long-edge "$OVERVIEW_LONG_EDGE" \
+  ${MAX_INSPECTS:+--max-inspects "$MAX_INSPECTS"} \
+  ${GRAD_ACCUM:+--grad-accum "$GRAD_ACCUM"} \
   "$@"
