@@ -3,7 +3,17 @@
 #
 #   SFT_CKPT=checkpoints/sft-qwen2.5-vl-32b sbatch scripts/arc_grpo.slurm
 #   MAX_INSPECTS=6 SFT_CKPT=... sbatch scripts/arc_grpo.slurm   # match the gate
-#   sbatch --nodes=1 scripts/arc_grpo.slurm          # single node, ~2× the wall clock
+#   sbatch --nodes=2 scripts/arc_grpo.slurm          # two nodes, ~half the wall clock
+#
+# Defaults to ONE node. Multi-node here crosses an InfiniBand fabric, and ARC's
+# GPU partitions are heterogeneous: a 2-node request was satisfied with
+# tc-dgx001 + tc-gpu002, whose HCAs do not talk to each other. Every rank
+# loaded, the trainer built, and the first BROADCAST died with
+#   NET/IB : ... status=5 ... vendor err 249 (Recv)
+# followed by a 600s watchdog timeout on the ranks still waiting. A single node
+# keeps all collectives on NVLink and queues far better besides. If you do want
+# two, pin them to one type with --constraint and be ready to set
+# NCCL_IB_DISABLE=1 to fall back to TCP.
 #
 # ZeRO-2 on purpose: every rollout turn calls generate(), and under ZeRO-3 that
 # gathers the sharded parameters once per turn. Stay on ZeRO-2 unless the policy
@@ -25,7 +35,7 @@
 # runnable without editing this file. Calibrate with --max-steps 5 before
 # committing a full allocation.
 #SBATCH --job-name=vrr-grpo
-#SBATCH --nodes=2
+#SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:8
 #SBATCH --cpus-per-task=32
