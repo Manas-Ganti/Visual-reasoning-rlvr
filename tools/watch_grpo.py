@@ -64,11 +64,15 @@ def main() -> None:
     ap.add_argument("--dataset", default=common.DATASET)
     ap.add_argument("--model", default="32b")
     ap.add_argument("--last", type=int, default=0, help="Only the N most recent step files.")
+    ap.add_argument("--dir", default=None,
+                    help="Checkpoint dir holding completions/. Defaults to the one implied "
+                         "by --model/--dataset; pass it explicitly for a run written to a "
+                         "custom --output-dir, whose completions the default path misses.")
     args = ap.parse_args()
 
     import pandas as pd
 
-    ckpt = common.checkpoint_dir("grpo", args.model, args.dataset)
+    ckpt = args.dir or common.checkpoint_dir("grpo", args.model, args.dataset)
     files = sorted(glob.glob(os.path.join(ckpt, "completions", "*.parquet")))
     if not files:
         raise SystemExit(f"no completions under {ckpt}/completions — has the job written a step yet?")
@@ -116,12 +120,14 @@ def main() -> None:
             reward=(rew, "mean"),
             pct_AI=("verdict", lambda s: (s == "AI").mean()),
             conf=("conf", "mean"),
+            answered=("answered", "mean"),
             inspects=("inspects", "mean"),
         ).round(3)
         print(t.to_string())
         print("\n  What to look for: pct_AI moving toward 0.50 (collapse correcting),")
-        print("  conf falling below ~0.9 (learning to hedge), inspects below 4.0")
-        print("  (learning efficiency). Reward alone can rise while all three stay stuck.")
+        print("  conf falling below ~0.9 (learning to hedge), answered rising toward 1.0,")
+        print("  inspects below the budget (efficiency). Reward alone can rise while all")
+        print("  of them stay stuck — that was the entire story of GRPO run 1.")
 
 
 if __name__ == "__main__":
