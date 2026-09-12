@@ -174,6 +174,11 @@ def main():
                     help="Dataset namespace for manifest/checkpoints/logs.")
     ap.add_argument("--manifest", default=None)
     ap.add_argument("--output-dir", default=None, help="Defaults to checkpoints/grpo-<model>.")
+    ap.add_argument("--resume", nargs="?", const=True, default=None,
+                    metavar="CHECKPOINT",
+                    help="Resume from a checkpoint-N directory. Bare --resume picks the "
+                         "latest inside --output-dir. GRPO writes one every save_steps, "
+                         "and a run killed at hour 10 is otherwise a total loss.")
     ap.add_argument("--max-inspects", type=int, default=4)
     ap.add_argument("--overview-long-edge", type=int, default=140,
                     help="Overview resolution — how much the low-res view is blurred. "
@@ -324,7 +329,12 @@ def main():
     # ETA + walltime-margin to W&B, so a 10–34h run is followable from the
     # dashboard alone. logging_steps=1 above means one ETA point per step.
     trainer.add_callback(common.progress_callback())
-    trainer.train()
+    # A killed run is only recoverable if save_steps produced a checkpoint AND we
+    # are told to pick it up: HF resumes optimizer, scheduler and step count, so
+    # the rollouts already paid for are not repeated.
+    if args.resume:
+        common.rank0_print(f"Resuming from {args.resume}")
+    trainer.train(resume_from_checkpoint=args.resume)
     trainer.save_model(output_dir)
     common.rank0_print(f"Saved GRPO policy to {output_dir}")
 

@@ -80,5 +80,6 @@ arc_torchrun training/grpo.py \
   --wandb-project "$WANDB_PROJECT" \
   --overview-long-edge "$OVERVIEW_LONG_EDGE" \
   ${MAX_INSPECTS:+--max-inspects "$MAX_INSPECTS"} \
+  ${RESUME:+--resume ${RESUME}} \
   ${GRAD_ACCUM:+--grad-accum "$GRAD_ACCUM"} \
   "$@"
