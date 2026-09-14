@@ -327,3 +327,47 @@ def test_always_confirmed_no_longer_earns_anything():
     t = _traj_with_belief(0.9, AI)
     _, b = compute_episode_reward(t, AI)
     assert b["prediction_tracking"] == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# belief_coherence is disabled
+# --------------------------------------------------------------------------- #
+# The scorer is kept (and still tested above) because the term is meant to come
+# back once the policy uses the RECONCILIATION tags as the prompt now defines
+# them. Until a run demonstrates that, its WEIGHT must stay zero: in GRPO run 2
+# it penalised 1,367 sound belief updates that happened to be tagged CONFIRMED.
+
+def test_belief_coherence_contributes_nothing_by_default():
+    assert RewardConfig().w_belief_coherence == 0.0
+
+
+def test_run2_shaped_episode_no_longer_forfeits_reward():
+    """The exact shape run 2 produced 1,367 times: CONFIRMED written to mean
+    "I checked this", followed by a sensible drop in P(fake).
+
+    The term never subtracted — it paid 0.30 for agreeing with the tag and 0.00
+    otherwise. So this shape forfeited 0.30 that a tag-agreeing sibling earned,
+    which under GRPO's group-relative advantage is a real push away from it.
+    With the weight at zero the two shapes are level on this term."""
+    run2 = traj_from_texts(
+        "OBSERVATION: x\nHYPOTHESIS: h\nACTION: INSPECT 5",
+        "RECONCILIATION: CONFIRMED - the lettering is crisp and legible.\n"
+        "BELIEF_UPDATE: P(fake)=0.2\nACTION: VERDICT REAL confidence=0.8",
+    )
+    tag_agreeing = traj_from_texts(
+        "OBSERVATION: x\nHYPOTHESIS: h\nACTION: INSPECT 5",
+        "RECONCILIATION: CONFIRMED - the lettering is garbled.\n"
+        "BELIEF_UPDATE: P(fake)=0.8\nACTION: VERDICT AI confidence=0.8",
+    )
+    # the scorer still reports the raw disagreement — disabled, not deleted
+    assert belief_coherence_score(run2) == 0.0
+    assert belief_coherence_score(tag_agreeing) == 1.0
+
+    old = RewardConfig(w_belief_coherence=0.30)
+    gap_before = (compute_episode_reward(tag_agreeing, AI, old)[1]["belief_coherence"]
+                  - compute_episode_reward(run2, REAL, old)[1]["belief_coherence"])
+    assert gap_before == pytest.approx(0.30)
+
+    gap_now = (compute_episode_reward(tag_agreeing, AI)[1]["belief_coherence"]
+               - compute_episode_reward(run2, REAL)[1]["belief_coherence"])
+    assert gap_now == 0.0

@@ -145,3 +145,52 @@ def test_env_explicit_domain_overrides_dataset(manifest):
     assert env.domain == "face"
     obs, _ = env.reset(options={"index": 0})
     assert "iris" in obs["messages"][0]["content"][0]["text"]
+
+
+# --------------------------------------------------------------------------- #
+# Evidence asymmetry and the reconciliation tag
+# --------------------------------------------------------------------------- #
+# GRPO run 2 showed the policy treating "I looked and saw nothing" as strong
+# proof of REAL — median P(fake) fell 0.50 -> 0.20 -> 0.10 -> 0.05 -> 0.01 over
+# five inspections of a 16-cell grid — and writing CONFIRMED to mean "I verified
+# this" 60.5% of the time, the opposite of the spec's intent. Both are now
+# addressed in the prompt; these guard the wording that does it.
+
+def test_prompt_states_the_evidence_asymmetry():
+    text = prompts.system_prompt("image", budget=6)
+    assert "FINDING an artifact is strong evidence of AI" in text
+    assert "WEAK evidence of REAL" in text
+
+
+def test_prompt_names_the_real_budget():
+    """'at most 6 of 16' is the argument; a vague 'some' is not."""
+    assert "at most 6 of 16 cells" in prompts.system_prompt("image", budget=6)
+    assert "at most 2 of 16 cells" in prompts.system_prompt("image", budget=2)
+
+
+def test_prompt_survives_an_unspecified_budget():
+    text = prompts.system_prompt("image")
+    assert "budget_hint" not in text and "{" not in text.split("OUTPUT FORMAT")[0]
+    assert "only a few of 16 cells" in text
+
+
+def test_mis_aimed_inspection_is_evidence_of_nothing():
+    text = prompts.system_prompt("image", budget=6)
+    assert "evidence of\nNOTHING" in text or "evidence of NOTHING" in text.replace("\n", " ")
+
+
+def test_reconciliation_tags_are_defined_against_the_fake_hypothesis():
+    text = prompts.system_prompt("image", budget=6)
+    for tag in ("CONFIRMED", "REFUTED", "UNCLEAR"):
+        assert tag in text
+    # the direction must be unmissable: CONFIRMED raises P(fake)
+    flat = " ".join(text.split())
+    assert "CONFIRMED means you FOUND something and P(fake) RISES" in flat
+    assert "that is REFUTED, not CONFIRMED" in flat
+
+
+def test_every_domain_carries_the_asymmetry():
+    for domain in prompts.DOMAINS:
+        text = prompts.system_prompt(domain, budget=4)
+        assert "WEAK evidence of REAL" in text, domain
+        assert "at most 4 of 16 cells" in text, domain

@@ -140,6 +140,22 @@ about what the cell will show; after the reveal, on your NEXT turn, you first \
 RECONCILE what you actually saw against that hypothesis and update your belief. \
 This predict-then-verify discipline is mandatory.
 
+HOW TO WEIGH WHAT YOU SEE. The two outcomes of an inspection are NOT equally \
+informative, and treating them as if they were is the single most common way to \
+get this wrong:
+- FINDING an artifact is strong evidence of AI. One clear artifact can settle it.
+- Finding NO artifact in a cell is WEAK evidence of REAL. You will inspect at \
+most {budget_hint} of 16 cells, so an artifact could sit in any of the cells you \
+never opened. A clean cell should move P(fake) only slightly — typically by less \
+than 0.1 — and several clean cells in a row still leave real uncertainty.
+- If a cell does not contain the feature you predicted, that is evidence of \
+NOTHING. You looked in the wrong place. Do not lower P(fake) for it; re-aim.
+
+So P(fake) should DRIFT DOWN SLOWLY on clean cells and can JUMP UP on a found \
+artifact. Ending near 0.0 having inspected a handful of cells and found nothing \
+is overconfident: without positive evidence of realness you cannot get far below \
+your starting uncertainty.
+
 You are NOT graded on how eloquent or detailed your writing is. You are graded on \
 reaching the right verdict efficiently, and on whether your beliefs move \
 sensibly given what you actually observed. Spend inspects only when a hypothesis \
@@ -164,13 +180,27 @@ BELIEF_UPDATE and start at OBSERVATION:
 
 On EVERY LATER turn, first reconcile the previous reveal, then continue:
 
-    RECONCILIATION: <CONFIRMED or REFUTED — did the reveal match your last \
-hypothesis, and how>
+    RECONCILIATION: <CONFIRMED, REFUTED or UNCLEAR — see below>
     BELIEF_UPDATE: P(fake)=<0.0-1.0> because <what moved it>
     OBSERVATION: <what the last reveal showed / what you now perceive>
     REASONING: <why your next step matters>
     HYPOTHESIS: <your next testable prediction>
     ACTION: INSPECT <n>
+
+RECONCILIATION answers ONE question: did the reveal produce the AI artifact your \
+hypothesis predicted? It is not about whether your description was accurate.
+
+    CONFIRMED  the predicted artifact IS there. Evidence of AI. P(fake) goes UP.
+               e.g. "CONFIRMED - the lettering is garbled nonsense."
+    REFUTED    you saw the predicted region clearly and it is CLEAN. Weak \
+evidence of REAL. P(fake) goes DOWN A LITTLE.
+               e.g. "REFUTED - the lettering is crisp and spells a real word."
+    UNCLEAR    the cell did not show the feature you predicted, or was too \
+ambiguous to judge. Evidence of NOTHING. P(fake) does NOT move.
+               e.g. "UNCLEAR - cell 10 holds shelving, not the face I predicted."
+
+Note the direction: CONFIRMED means you FOUND something and P(fake) RISES. If \
+you looked and everything seemed fine, that is REFUTED, not CONFIRMED.
 
 To finish, replace the ACTION line with a verdict (you may still write \
 RECONCILIATION / BELIEF_UPDATE first):
@@ -180,16 +210,25 @@ RECONCILIATION / BELIEF_UPDATE first):
 Emit exactly one ACTION line and write nothing after it."""
 
 
-def system_prompt(domain: str | None = None, dataset: str | None = None) -> str:
+def system_prompt(domain: str | None = None, dataset: str | None = None,
+                  budget: int | None = None) -> str:
     """The full system prompt (grounding + format spec) for one domain.
 
     This is the only way to build the prompt — there is deliberately no
     module-level ``SYSTEM_PROMPT_FULL`` constant, because a global resolved at
     import time is exactly how the face checklist survived a substrate switch.
+
+    ``budget`` is the env's inspect budget. It appears in the evidence-asymmetry
+    paragraph, which argues from how much of the image stays unseen: "at most 6
+    of 16 cells" is a concrete reason not to read a few clean cells as proof,
+    where a vague "some" is not. Pass the env's real ``max_inspects``.
     """
     d = get_domain(domain, dataset)
     return (
-        SYSTEM_PROMPT_TEMPLATE.format(subject=d.subject, artifacts=d.artifacts)
+        SYSTEM_PROMPT_TEMPLATE.format(
+            subject=d.subject, artifacts=d.artifacts,
+            budget_hint=str(budget) if budget else "only a few",
+        )
         + "\n\n"
         + FORMAT_SPEC_TEMPLATE.format(hypothesis_example=d.hypothesis_example)
     )

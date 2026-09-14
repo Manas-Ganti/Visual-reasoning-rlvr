@@ -11,12 +11,18 @@ weights:
 
 * ``verdict_correct`` carries the dominant weight so a right answer always beats a
   wrong one no matter how pretty the trajectory around it.
-* ``belief_coherence`` and ``verdict_consistency`` reward the *process* — that the
-  agent's stated P(fake) moved in the direction its own reconciliations imply, and
-  that the final call follows from the accumulated evidence rather than
-  contradicting it. These are ungated (they apply even to wrong answers) on
-  purpose: they shape *how* the agent reasons. They are deliberately weaker than
-  ``verdict_correct`` so they can never make a confidently-wrong episode look good.
+* ``verdict_consistency`` rewards the *process* — that the final call follows from
+  the accumulated evidence rather than contradicting it. It is ungated (it applies
+  even to wrong answers) on purpose: it shapes *how* the agent reasons, and is
+  deliberately weaker than ``verdict_correct`` so it can never make a
+  confidently-wrong episode look good.
+* ``belief_coherence`` is now weighted **0.0**. It paid for P(fake) moving the way
+  the RECONCILIATION tag implied, but the policy and the term disagreed about what
+  the tag meant: run 2 wrote CONFIRMED to mean "I checked this" and then sensibly
+  lowered its estimate, 60.5% of the time. The term read that as incoherent and
+  penalised it. A process term that punishes correct reasoning is worse than no
+  process term, so it is off until the rewritten prompt is shown to have fixed the
+  tag's meaning.
 * ``belief_brier`` scores the FINAL P(fake) with a proper scoring rule. The agent
   writes a calibrated probability every turn and, before this term existed, the
   reward read only the binary verdict — so honest uncertainty paid nothing. GRPO
@@ -56,7 +62,17 @@ class RewardConfig:
     # Positive terms
     w_correct: float = 1.0             # ±this on a right / wrong verdict
     w_belief_brier: float = 0.40       # proper scoring rule on the FINAL P(fake)
-    w_belief_coherence: float = 0.30   # beliefs move sensibly given reconciliations
+    # Was 0.30, now off. It asks whether P(fake) moved in the direction the
+    # RECONCILIATION tag implies — sound in principle, but the tag did not mean
+    # what the term assumed. In GRPO run 2, 60.5% of CONFIRMED reconciliations
+    # were followed by the belief going DOWN: the policy wrote CONFIRMED to mean
+    # "I verified what I saw", then correctly lowered its estimate. This term
+    # scored 1,367 of those as incoherent, so ten hours of GRPO were spent
+    # pushing against correct belief updating. The prompt now defines the three
+    # tags against the fake-hypothesis explicitly; re-enable this term only once
+    # a run shows the policy using them that way (coherence well above run 2's
+    # 29%), or it will mistrain again.
+    w_belief_coherence: float = 0.0    # beliefs move sensibly given reconciliations
     w_verdict_consistency: float = 0.30  # final call follows accumulated evidence
     # Was 0.10, now off. It pays for the *fraction* of reconciliations marked
     # CONFIRMED, and its own docstring admits always-CONFIRMED maxes it. Run 1

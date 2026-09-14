@@ -81,7 +81,7 @@ class InvestigationEnv(gym.Env):
         # constant, so a dataset switch cannot leave the agent hunting for face
         # artifacts on ImageNet photographs. See env/prompts.py.
         self.domain = domain or prompts.resolve_domain(dataset)
-        self.system_prompt = prompts.system_prompt(self.domain)
+        self.system_prompt = prompts.system_prompt(self.domain, budget=max_inspects)
         self.max_inspects = max_inspects
         # A few turns of slack beyond the budget for the terminal verdict turn and
         # a little tolerance for malformed retries, so the episode can't hang.
