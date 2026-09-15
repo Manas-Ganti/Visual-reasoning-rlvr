@@ -102,6 +102,37 @@ policy away from updating its beliefs sensibly. Measured coherence was 29%.
 
 ---
 
+## The signal is there — the reasoning is what loses it
+
+Budget probe on the same SFT checkpoint (job run after this analysis), scoring the
+model's AI/REAL ranking rather than its committed verdict, cells chosen at random:
+
+| budget | image seen | AUC | best acc | gap vs b=0 |
+|---|---|---|---|---|
+| 0 | 0% | 0.586 | 0.596 | — (floor) |
+| 2 | 12% | 0.755 | 0.724 | +0.169 |
+| 4 | 25% | 0.786 | 0.744 | +0.200 |
+| 6 | 38% | **0.820** | **0.763** | **+0.234** |
+
+Three things follow.
+
+**The perception is intact.** At budget 4 the SFT checkpoint scores 0.786 AUC —
+the same as the untrained base measured before any of this. SFT did not damage
+the model's ability to discriminate; it changed only what the model says about
+it. The 0.455 verdict accuracy and the 0.763 available from the same model's own
+scores are the same network on the same images.
+
+**~31 points are lost between seeing and answering.** That is the cost of the
+inference error above, and it is what cycle 3 is trying to recover.
+
+**0.763 is a lower bound.** Cells were picked at random. A policy that chooses
+cells well should beat it, which is the environment's central claim and the first
+evidence that it holds.
+
+Budget 6 is also the first measurement at the budget the policy trains at — the
+`eval` branch of `arc_infer.slurm` ignores `MAX_INSPECTS` and uses `--budgets`, so
+every earlier number came from budgets 2 and 4.
+
 ## Changes made
 
 1. **`env/prompts.py` — the evidence asymmetry is now stated.** Finding an
