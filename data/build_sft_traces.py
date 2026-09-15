@@ -42,6 +42,20 @@ from training import vllm_backend
 
 # Paths are dataset-namespaced (see training/common.py: VRR_DATASET).
 
+# The hint reveals the label so the teacher produces usable trajectories at a
+# workable keep rate. The danger is that it then states conclusions the *student*
+# can never reach: the student is never told the answer, so a trace that jumps to
+# certainty on the last turn teaches unearned confidence and nothing else.
+#
+# The first version asked only for a "calibrated" VERDICT confidence and said
+# nothing about the final BELIEF_UPDATE. Measured on 916 traces: the belief held
+# 0.35-0.50 through the whole investigation and then slammed to the rail, with
+# 88% of REAL traces ending at P(fake) <= 0.05 — asserting 50-to-1 odds from
+# having found nothing in 6 of 16 cells. GRPO run 2's policy, trained on exactly
+# that shape, ran at 0.98 mean confidence with 80% of beliefs saturated.
+#
+# So the note now names the asymmetry the system prompt states, and puts a floor
+# under a REAL conclusion. See results/reasoning_trace_analysis.md.
 TEACHER_HINT = (
     "INSTRUCTOR NOTE (not part of the record): the ground-truth label for this "
     "image is {truth}. Produce a *genuine* investigation that a careful analyst "
@@ -49,6 +63,21 @@ TEACHER_HINT = (
     "commit a testable HYPOTHESIS before each inspect, and RECONCILE honestly "
     "after each reveal. Keep P(fake) moving consistently with what you observe, "
     "and finish with ACTION: VERDICT {truth} confidence=<your calibrated value>. "
+    "\n\n"
+    "CRITICAL — your numbers must be reachable WITHOUT this note. You know the "
+    "answer; the analyst reading your trace does not, and the model trained on it "
+    "will never be told. Every P(fake) you write, including the last one, must "
+    "follow from the evidence you actually uncovered, not from this note. "
+    "\n"
+    "The two conclusions are NOT symmetric. You inspect at most {budget} of 16 "
+    "cells. Concluding AI means you FOUND an artifact — one clear artifact you "
+    "actually saw justifies a high P(fake) and high confidence. Concluding REAL "
+    "means only that you FAILED to find one in the cells you happened to open; it "
+    "does not prove there is none in the ten you did not. So end a REAL "
+    "investigation around P(fake)=0.15-0.35 with a matching confidence, NOT at "
+    "0.0-0.05. A REAL trace that ends at P(fake)=0.02 is making a claim the "
+    "evidence cannot support, and is not usable."
+    "\n\n"
     "Follow the required labelled format exactly."
 )
 
@@ -58,7 +87,8 @@ def inject_teacher_hint(env) -> None:
     we persist only the assistant turns."""
     truth = env._ground_truth()
     env.state["messages"].append(
-        {"role": "user", "content": [{"type": "text", "text": TEACHER_HINT.format(truth=truth)}]}
+        {"role": "user", "content": [{"type": "text", "text": TEACHER_HINT.format(
+            truth=truth, budget=env.max_inspects)}]}
     )
 
 
