@@ -48,4 +48,5 @@ arc_torchrun training/sft.py \
   --wandb-project "$WANDB_PROJECT" \
   --overview-long-edge "$OVERVIEW_LONG_EDGE" \
   ${TARGET_AI_FRAC:+--target-ai-frac "$TARGET_AI_FRAC"} \
+  ${MIN_REAL_BELIEF:+--min-real-belief "$MIN_REAL_BELIEF"} \
   "$@"

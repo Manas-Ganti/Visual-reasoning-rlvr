@@ -33,6 +33,7 @@ optimizer/param state inside the data-parallel group. One process per GPU.
 from __future__ import annotations
 
 import argparse
+import re
 import json
 import os
 import random
@@ -94,6 +95,59 @@ class VisionSFTCollator:
             labels[labels == image_token_id] = -100
         batch["labels"] = labels
         return batch
+
+
+_PFAKE_SFT = re.compile(r"P\(fake\)\s*=\s*([0-9]*\.?[0-9]+)", re.I)
+
+
+def _final_belief(trace: dict) -> float | None:
+    """The last P(fake) the teacher wrote — the number the student copies."""
+    vals = []
+    for turn in trace.get("actions", []):
+        for x in _PFAKE_SFT.findall(turn):
+            try:
+                vals.append(float(x))
+            except ValueError:      # the teacher writes prose: "0.7." and friends
+                pass
+    return vals[-1] if vals else None
+
+
+def drop_overconfident_real(traces: list[dict], env, floor: float) -> list[dict]:
+    """Drop REAL traces whose final P(fake) sits below ``floor``.
+
+    A REAL conclusion is reached by NOT finding an artifact in at most 6 of 16
+    cells, which cannot support 50-to-1 odds — the system prompt says so, and
+    these traces say the opposite. They are the examples that teach unearned
+    certainty, and GRPO run 2's policy (0.98 mean confidence, 80% of beliefs
+    saturated) is what training on them produces.
+
+    The teacher hint asks for 0.15-0.35 on REAL and only partly complies: the
+    rail share fell 88% -> 60% but the median is still 0.05. Dropping the
+    remainder is free where a third distillation pass is four more GPU-hours.
+
+    AI traces are never dropped: one artifact actually seen justifies a high
+    P(fake), so 0.99 there is earned. That asymmetry also raises the AI fraction,
+    which is the direction ``--target-ai-frac`` was already pushing.
+    """
+    if floor <= 0:
+        return traces
+    label_of = {i: int(r.get("label", 0)) for i, r in enumerate(env.records)}
+    kept, dropped = [], 0
+    for tr in traces:
+        is_real = label_of.get(tr.get("index"), 0) == 0
+        p = _final_belief(tr)
+        if is_real and p is not None and p < floor:
+            dropped += 1
+            continue
+        kept.append(tr)
+    n_ai = sum(1 for t in kept if label_of.get(t.get("index"), 0) == 1)
+    common.rank0_print(
+        f"[calibration] dropped {dropped} REAL traces ending below P(fake)={floor} "
+        f"({len(traces)} -> {len(kept)}); AI now {n_ai} ({n_ai / max(len(kept), 1):.1%})")
+    if len(kept) < 300:
+        common.rank0_print("[calibration] WARNING: under 300 traces left — consider a "
+                           "lower --min-real-belief rather than training on this few")
+    return kept
 
 
 def balance_traces(traces: list[dict], env, target_ai: float | None,
@@ -158,6 +212,12 @@ def main():
                     help="Dataset namespace for manifest/traces/checkpoints/logs.")
     ap.add_argument("--manifest", default=None)
     ap.add_argument("--traces", default=None)
+    ap.add_argument("--min-real-belief", type=float, default=0.0, metavar="P",
+                    help="Drop REAL traces whose final P(fake) is below this. A REAL "
+                         "conclusion comes from NOT finding an artifact in a handful of "
+                         "cells and cannot support near-certainty; those traces teach "
+                         "the saturation measured in GRPO run 2. 0.10 is the sane value "
+                         "on a set the teacher hint only partly fixed; 0 disables.")
     ap.add_argument("--target-ai-frac", type=float, default=None, metavar="F",
                     help="Oversample traces until AI is F of the set (e.g. 0.65). The "
                          "policy's prior is set here and nowhere else: GRPO's within-group "
@@ -211,6 +271,9 @@ def main():
                            shuffle=False, dataset=args.dataset,
                            overview_long_edge=args.overview_long_edge)
     traces = load_traces(args.traces)
+    # Calibration first, then class balance: dropping rail-REAL traces already
+    # raises the AI fraction, so balancing afterwards works from the real ratio.
+    traces = drop_overconfident_real(traces, env, args.min_real_belief)
     traces = balance_traces(traces, env, args.target_ai_frac)
     conversations = [c for t in traces if (c := replay_to_conversation(env, t))]
     common.rank0_print(f"Loaded {len(traces)} traces; {len(conversations)} replayed cleanly.")
