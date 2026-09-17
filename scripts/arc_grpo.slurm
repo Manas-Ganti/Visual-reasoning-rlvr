@@ -70,6 +70,12 @@ DEGRADATION="${DEGRADATION:-clean}"
 # accepted MAX_INSPECTS=6 on the command line and silently ignored it.
 MAX_INSPECTS="${MAX_INSPECTS:-}"
 GRAD_ACCUM="${GRAD_ACCUM:-}"                       # default: one GRPO group/step
+# Per-TURN generation budget. 640 was sized for the old prompt; the evidence
+# asymmetry paragraph and the three tag definitions ask for more writing per
+# turn, and the group-variance gate fell from a 99.8% answer rate to 75.8% at
+# the same inspect budget. A turn cut off before its ACTION line is unparseable,
+# so the episode burns a turn and can end with no verdict at -1.00.
+MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-}"
 
 arc_torchrun training/grpo.py \
   --model "$MODEL" \
@@ -82,4 +88,5 @@ arc_torchrun training/grpo.py \
   ${MAX_INSPECTS:+--max-inspects "$MAX_INSPECTS"} \
   ${RESUME:+--resume ${RESUME}} \
   ${GRAD_ACCUM:+--grad-accum "$GRAD_ACCUM"} \
+  ${MAX_NEW_TOKENS:+--max-new-tokens "$MAX_NEW_TOKENS"} \
   "$@"
