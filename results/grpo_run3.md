@@ -58,6 +58,59 @@ positive (0.376 → 0.380 → 0.389). Choosing cells is precisely what GRPO opti
 so this is where an effect would first appear. At n=156 per cell it is not
 significant, and it should be treated as a lead rather than a result.
 
+## The pattern in the trajectories: the investigation confirms, it does not investigate
+
+Measured over 988 recovered rollouts.
+
+**Right and wrong traces are indistinguishable.** Split by whether the verdict was
+correct, then by which verdict was given, every summary statistic matches:
+
+| answered AI | CONFIRMED | REFUTED | first P(fake) | final P(fake) | words |
+|---|---|---|---|---|---|
+| right (n=250) | 0.68 | 0.28 | 0.55 | 0.93 | 1663 |
+| wrong (n=166) | 0.69 | 0.37 | 0.54 | 0.94 | 1759 |
+
+| answered REAL | CONFIRMED | REFUTED | first P(fake) | final P(fake) | words |
+|---|---|---|---|---|---|
+| right (n=279) | 0.09 | 2.44 | 0.41 | 0.12 | 1822 |
+| wrong (n=259) | 0.04 | 3.07 | 0.39 | 0.11 | 1648 |
+
+Nothing in the trajectory predicts correctness. And the reason is the first row of
+numbers: **the verdict agrees with the belief written after ONE inspection 80.1% of
+the time.** The remaining five inspections change the answer in 19.9% of episodes;
+the belief crosses 0.5 only 0.33 times per episode and travels a median range of
+0.20 after the first update.
+
+The model forms an impression from its first look — which is about as accurate as
+a coin flip, identically so for right and wrong episodes — and spends the rest of
+its budget building a case for it.
+
+This explains three things that did not previously fit:
+
+- **Why right and wrong traces look the same.** Both are produced by the same
+  process; correctness was settled at turn one.
+- **Why more reveals made the SFT policy worse** (0.421 → 0.357). More inspections
+  confirm a first impression that is wrong half the time, so the policy gets more
+  confident rather than more accurate.
+- **Why 0.820 AUC internally becomes 0.385 in writing.** The probe scores the model
+  seeing all six reveals at once. The written verdict is anchored to cell one.
+
+### The experiment this suggests
+
+**Stop requiring a running P(fake) every turn.** The policy writes `P(fake)=0.55`
+on turn one and that number stays in its own context for the rest of the episode,
+read by every later turn. The format builds the anchor.
+
+Collect per-cell OBSERVATIONs during the investigation and ask for P(fake) exactly
+once, at the end, over the accumulated evidence — which is how the budget probe
+reads the image, and the budget probe reaches 0.820. It is an environment change
+rather than a training one, it costs one distillation cycle, and it is directly
+falsifiable: if the verdict stops tracking the first belief, it worked.
+
+Note this trades away a reward signal — `belief_coherence` and the belief path both
+read intermediate numbers. `belief_coherence` is already 0.0, and `belief_brier`
+only uses the final belief, so the cost is smaller than it looks.
+
 ## What is left, ranked
 
 1. **600 steps.** The only run that moved anything took 600; this took 140 at a KL
