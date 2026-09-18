@@ -1,6 +1,6 @@
 # What we know
 
-*Running synthesis, current as of 2026-09-15 (cycle 3 SFT in flight). Written to
+*Running synthesis, current as of 2026-09-18 (cycle 3 complete: see `grpo_run3.md`). Written to
 stop us re-running things that are already settled. Every number here was
 measured; where something is untested it says so.*
 
@@ -122,10 +122,11 @@ the budget it trained on. Details in `docs/arc_runbook.md` and
 
 ## 7. Open questions
 
-- **Does calibrated SFT move the prior?** The cycle-3 question. If the eval
-  AI-rate is still ~15% after the asymmetry prompt, the tag fix and the
-  calibration filter, three interventions have failed and the honest finding is
-  that this pipeline cannot move the base model's prior.
+- ~~**Does calibrated SFT move the prior?**~~ **ANSWERED, cycle 3: yes, and it did
+  not matter.** Predicted-AI went 13.4% → 46.3% and held through GRPO. Held-out
+  accuracy did not move (0.417 SFT, 0.385 GRPO, against 0.404 base). The prior was
+  a symptom. Note the *base* model moved 16.5% → 50.4% on the prompt change alone —
+  SFT added nothing on top.
 - **Does the teacher hint poison the traces?** The teacher is shown the label and
   is right 98.4% of the time, so it has no reason to hedge. Dropping the hint
   entirely — accepting a much lower keep rate for genuinely earned conclusions —
