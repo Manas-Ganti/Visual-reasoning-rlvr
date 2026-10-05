@@ -28,6 +28,7 @@ mkdir -p logs/slurm "logs/${VRR_DATASET:-genimage}"
 # SLURM copies the batch script to its spool dir, so ${BASH_SOURCE[0]} does NOT
 # point into the repo — resolve against the submit dir instead.
 source "${SLURM_SUBMIT_DIR:-$PWD}/scripts/arc_env.sh"
+arc_require trl peft
 
 trap arc_notify_finish EXIT
 arc_notify "<b>START</b> sft ${SLURM_JOB_ID:-?} · ${VRR_DATASET:-?} · ${SLURM_JOB_NODELIST:-?}"

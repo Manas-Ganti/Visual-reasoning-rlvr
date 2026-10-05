@@ -48,6 +48,7 @@ mkdir -p logs/slurm "logs/${VRR_DATASET:-genimage}"
 # SLURM copies the batch script to its spool dir, so ${BASH_SOURCE[0]} does NOT
 # point into the repo — resolve against the submit dir instead.
 source "${SLURM_SUBMIT_DIR:-$PWD}/scripts/arc_env.sh"
+arc_require vllm
 
 # One launcher serves several stages, so a static #SBATCH --job-name makes
 # every one of them look identical in squeue. Directives cannot read env

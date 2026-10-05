@@ -21,6 +21,12 @@ up launcher edits. Python files and `arc_env.sh` are read at RUN time and will.
 
 ## Conda environments — crossing them fails
 
+`arc_require` (in `arc_env.sh`) now catches this at job start instead of after the
+allocation is spent: each launcher names the imports its stage needs, and the job
+dies in seconds with the right env named. Activation succeeding tells you nothing
+about whether it is the RIGHT env — all three import PIL.
+
+
 | env | path | for |
 |---|---|---|
 | `vrr` | `/home/manasganti/miniconda3/envs/vrr` | anything via `arc_infer.slurm` — gates, budget probe, distill, eval, groupvar (vLLM 0.8.5, transformers 4.51) |

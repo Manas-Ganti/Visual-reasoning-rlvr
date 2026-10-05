@@ -207,6 +207,46 @@ except ImportError as e:
     sys.exit("[arc_env] FATAL: %s in %s" % (e, sys.executable))
 ' || { echo "[arc_env] FATAL: python check failed (PY=$PY)" >&2; return 1 2>/dev/null || exit 1; }
 
+# ---- which env, not just whether it activated --------------------------- #
+# The check above proves the interpreter is inside $CONDA_ENV and that PIL
+# imports. It does NOT prove this is the RIGHT env for this stage, and the three
+# envs are mutually exclusive by construction: vLLM 0.8.5 pins transformers
+# 4.51, TRL 1.9.2 needs 5.x. An SFT job submitted with the inference env gets
+# through activation, loads the model, and dies on an ImportError from inside
+# trl — after the 8-GPU allocation is already spent. That happened.
+#
+# Each launcher calls this right after sourcing, naming the imports its stage
+# cannot run without:
+#
+#     arc_require trl peft          # arc_sft.slurm, arc_grpo.slurm
+#     arc_require vllm              # arc_infer.slurm
+#     arc_require diffusers         # arc_synth.slurm
+#
+arc_require() {
+  [ $# -gt 0 ] || return 0
+  REQ="$*" "$PY" -c '
+import importlib, os, sys
+mods = os.environ["REQ"].split()
+missing = []
+for m in mods:
+    try:
+        importlib.import_module(m)
+    except ImportError:
+        missing.append(m)
+if missing:
+    env = os.environ.get("CONDA_ENV", "?")
+    sys.stderr.write(
+        "[arc_env] FATAL: this stage needs %s, missing from %s\n"
+        % (", ".join(missing), env))
+    sys.stderr.write(
+        "[arc_env]        vrr = vLLM (gates/probes/distill/eval) · "
+        "vrr-train = trl+peft (sft/grpo) · vrr-gen = diffusers (synth)\n")
+    sys.stderr.write("[arc_env]        Re-submit with CONDA_ENV pointing at the right one.\n")
+    sys.exit(1)
+print("[arc_env] requires " + " ".join(mods) + " — present", flush=True)
+' || { return 1 2>/dev/null || exit 1; }
+}
+
 cd "$PROJECT_DIR"
 
 # ---- distributed rendezvous ----------------------------------------------- #
