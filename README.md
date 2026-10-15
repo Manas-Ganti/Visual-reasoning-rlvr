@@ -115,15 +115,48 @@ training rollouts via HF `generate` (needs logprobs). Training is data-parallel
 across GPUs/nodes with **DeepSpeed ZeRO** sharding inside the group. All stages
 logged to **W&B**. DPO was cut — data-starved at this scale; SFT→GRPO suffices.
 
-### Headline result (populate after runs)
+### Headline result (Qwen2.5-VL-32B, `synth1024`)
 
-Pass rate per stage × degradation, `test` split:
+**Short version:** the environment has measured headroom, and GRPO improved
+discrimination. Held-out accuracy has **not** moved off the base model in three
+cycles. Every number below was measured. Full write-ups are in
+[`results/what_we_know.md`](results/what_we_know.md),
+[`results/grpo_run1.md`](results/grpo_run1.md) and
+[`results/grpo_run3.md`](results/grpo_run3.md).
 
-| Stage | clean | jpeg | blur_downscale |
+**The substrate has headroom** (gates, base 32B):
+
+| gate | value | verdict |
+|---|---|---|
+| geometry predicts the label | 0.500 AUC | clean (was 0.850 on GenImage) |
+| ceiling, full image | 0.930 AUC | PASS (≥0.85) |
+| floor, 56px overview | 0.591 AUC | PASS (≈0.5) |
+| available at budget 6, random cells | **0.820 AUC / 0.763 acc** | the target |
+| group variance on the SFT policy | 0.938 usable | PASS (≥0.40) |
+
+**GRPO cycle 1** (600 steps, budget 4): discrimination gap **−3.4% → +15.8%**
+(anti-correlated → discriminating), mean reward −0.032 → +0.183. Held-out
+accuracy was **0.545 vs 0.513 base (McNemar p=0.23)**, not significant. The
+marginal AI-rate stayed at 21.2% → 21.6%, because the group-relative advantage
+cancels across balanced data.
+
+**GRPO cycle 3** (140 steps, budget 6): the prompt and reward fixes held
+(answer rate 0.997, predicted-AI 46.8% → 40.7%), and accuracy did not follow.
+Held-out, clean, budget 2:
+
+| | base | SFT (c3) | GRPO (c3) |
 |---|---|---|---|
-| Baseline | – | – | – |
-| SFT | – | – | – |
-| GRPO | – | – | – |
+| accuracy | 0.404 | 0.417 | 0.385 |
+| McNemar vs base | — | p=1.0 | p=0.80 |
+| predicts AI | 45.8% | 46.3% | 38.7% |
+| recall(AI) | 0.441 | 0.493 | 0.375 |
+
+**Why:** over 988 rollouts, the verdict matches the belief written after the
+*first* inspection 80.1% of the time. The investigation confirms a first
+impression instead of testing it. That accounts for the ~35-point gap between
+what the model can rank (0.820 AUC) and what it answers. Per-degradation
+(`jpeg`, `blur_downscale`) numbers have not been reported yet, and no policy has
+been evaluated at budget 6.
 
 ### Stage 3 — proving the learning is real
 
