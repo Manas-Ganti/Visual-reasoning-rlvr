@@ -1,12 +1,17 @@
 """Image degradation — one of the two honest difficulty axes (the other being
 inspect-budget tightness).
 
-The substrate is StyleGAN2-only, so there are no multi-generator tiers to lean
-on. Instead we make the *same* images harder by degrading them: JPEG compression
-and blur/downscale both erode the fine, high-frequency cues (hair strands, iris
-edges, skin micro-texture) that betray a GAN face. The eval harness reports pass
-rate per degradation level, and Stage-3 verification holds out an unseen level to
-prove the policy generalizes to difficulty it never trained on.
+GenImage carries a ``generator`` per row, but that axis is categorical rather
+than ordered — useful for a breakdown, not a difficulty ladder. So we make the
+*same* images harder by degrading them: JPEG compression and blur/downscale both
+erode the cues that betray a generated image (texture detail, the legibility of
+rendered text, the crispness of object boundaries and shadow edges). The eval
+harness reports pass rate per degradation level, and Stage-3 verification holds
+out an unseen level to prove the policy generalizes to difficulty it never
+trained on.
+
+Degradation is also the knob that moves the policy into the band where GRPO has
+signal — see ``tools/group_variance_probe.py``.
 
 Every transform is deterministic given ``(image, level)`` so a manifest row +
 level fully reproduces the pixels the agent saw. Applied consistently to the

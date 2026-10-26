@@ -1,0 +1,26 @@
+{
+  "_comment": [
+    "ZeRO-2: shards optimizer state + gradients, replicates parameters.",
+    "The default for LoRA runs (SFT and GRPO) — only the adapter has gradients,",
+    "so there is little optimizer state to shard, and keeping full parameters on",
+    "each rank means generate() during GRPO rollouts needs no param gathering.",
+    "Fits a 32B LoRA run on 80GB cards; use zero3 for 72B or full finetuning."
+  ],
+  "bf16": { "enabled": "auto" },
+  "zero_optimization": {
+    "stage": 2,
+    "allgather_partitions": true,
+    "allgather_bucket_size": 5e8,
+    "overlap_comm": true,
+    "reduce_scatter": true,
+    "reduce_bucket_size": 5e8,
+    "contiguous_gradients": true,
+    "round_robin_gradients": true
+  },
+  "gradient_accumulation_steps": "auto",
+  "gradient_clipping": "auto",
+  "train_batch_size": "auto",
+  "train_micro_batch_size_per_gpu": "auto",
+  "steps_per_print": 50,
+  "wall_clock_breakdown": false
+}

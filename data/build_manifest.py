@@ -1,4 +1,14 @@
-"""Build ``data/manifest.jsonl`` from the Fake-Vs-Real-Faces (Hard) dataset.
+"""Build the faces manifest from the Fake-Vs-Real-Faces (Hard) dataset.
+
+**RETIRED SUBSTRATE — kept so the negative result stays reproducible.** The base
+VLM cannot separate these two classes: 0.390 accuracy against a 0.570 majority
+baseline, zero recall on the AI class, at full resolution with no environment in
+the way. Do not start new work here; use ``build_manifest_genimage.py``. The
+measurement and the two structural reasons are in
+``results/faces_negative_result.md``. To reproduce it::
+
+    VRR_DATASET=faces python data/build_manifest.py
+    VRR_DATASET=faces python tools/ceiling_probe.py --backend vllm --condition full
 
 Substrate: ``hamzaboulahia/hardfakevsrealfaces`` on Kaggle — 1,288 300×300 JPEGs
 (700 StyleGAN2 fakes from thispersondoesnotexist, 589 real from Unsplash), with a
@@ -9,7 +19,7 @@ labels (those appear only in the eval-only evidence slice; see ``curation.md``).
 
 This script is deliberately tolerant about the on-disk layout (Kaggle mirrors
 reorganize), resolving images by either the CSV or a fake/real subfolder
-convention, copies them into ``data/images/`` so the manifest is portable and
+convention, copies them into ``data/<dataset>/images/`` so the manifest is portable and
 reproducible (rerun on the A100 to regenerate identical splits), and writes rows::
 
     {"id", "file_name" (repo-relative), "label" (0 real / 1 AI), "split"}
@@ -27,13 +37,17 @@ import csv
 import json
 import os
 import shutil
+import sys
 from collections import defaultdict
 
 from PIL import Image
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-IMAGES_DIR = os.path.join(REPO_ROOT, "data", "images")
-MANIFEST_PATH = os.path.join(REPO_ROOT, "data", "manifest.jsonl")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from training import common  # noqa: E402
+
+DATASET = "faces"
+REPO_ROOT = common.REPO_ROOT
 
 _IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 _FAKE_WORDS = ("fake", "ai", "synthetic", "gan", "1")
@@ -144,11 +158,15 @@ def _stratified_split(rows, val_frac, test_frac, seed):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", default=None, help="Local path to an unzipped dataset (skips download).")
-    ap.add_argument("--out", default=MANIFEST_PATH)
+    ap.add_argument("--dataset", default=DATASET,
+                    help="Namespace under data/ (default: faces, the retired substrate).")
+    ap.add_argument("--out", default=None)
     ap.add_argument("--val", type=float, default=0.1)
     ap.add_argument("--test", type=float, default=0.1)
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
+    args.out = args.out or common.manifest_path(args.dataset)
+    os.makedirs(os.path.dirname(args.out), exist_ok=True)
 
     root = args.src or _download()
     print(f"Dataset root: {root}")
@@ -162,15 +180,16 @@ def main():
     print(f"Discovered {len(rows)} labeled images "
           f"({sum(l == 1 for _, l in rows)} fake / {sum(l == 0 for _, l in rows)} real).")
 
-    os.makedirs(IMAGES_DIR, exist_ok=True)
+    images_dir = common.images_dir(args.dataset)
+    os.makedirs(images_dir, exist_ok=True)
     assigned = _stratified_split(rows, args.val, args.test, args.seed)
 
     counts: dict[str, int] = defaultdict(int)
     with open(args.out, "w") as out:
         for i, (src_path, label, split) in enumerate(assigned):
             sub = "fake" if label == 1 else "real"
-            os.makedirs(os.path.join(IMAGES_DIR, sub), exist_ok=True)
-            dst = os.path.join(IMAGES_DIR, sub, f"{sub}_{i:05d}.png")
+            os.makedirs(os.path.join(images_dir, sub), exist_ok=True)
+            dst = os.path.join(images_dir, sub, f"{sub}_{i:05d}.png")
             try:
                 Image.open(src_path).convert("RGB").save(dst)  # normalize to PNG
             except Exception as e:  # skip unreadable files rather than abort

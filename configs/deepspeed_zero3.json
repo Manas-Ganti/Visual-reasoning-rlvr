@@ -1,0 +1,28 @@
+{
+  "_comment": [
+    "ZeRO-3: shards parameters as well, so a 72B never materializes whole on any",
+    "one rank. Required for 72B SFT and for full finetuning at any size.",
+    "For GRPO prefer ZeRO-2: every rollout turn calls generate(), and under ZeRO-3",
+    "that means gathering the parameters once per turn (correct, but a collective",
+    "per turn). stage3_gather_16bit_weights_on_model_save writes a normal",
+    "checkpoint instead of shard files."
+  ],
+  "bf16": { "enabled": "auto" },
+  "zero_optimization": {
+    "stage": 3,
+    "overlap_comm": true,
+    "contiguous_gradients": true,
+    "reduce_bucket_size": "auto",
+    "stage3_prefetch_bucket_size": "auto",
+    "stage3_param_persistence_threshold": "auto",
+    "stage3_max_live_parameters": 1e9,
+    "stage3_max_reuse_distance": 1e9,
+    "stage3_gather_16bit_weights_on_model_save": true
+  },
+  "gradient_accumulation_steps": "auto",
+  "gradient_clipping": "auto",
+  "train_batch_size": "auto",
+  "train_micro_batch_size_per_gpu": "auto",
+  "steps_per_print": 50,
+  "wall_clock_breakdown": false
+}

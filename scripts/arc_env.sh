@@ -1,0 +1,316 @@
+#!/usr/bin/env bash
+# Shared environment for the VT ARC SLURM jobs (sourced, not executed).
+#
+# Everything site-specific lives here so the .slurm files stay about the run.
+# Verify the two site facts before the first launch — they change between
+# clusters and over time:
+#
+#   sinfo -o "%P %G %D %m %N"        # partitions, per-node GPUs, node names
+#   quota                            # where to put HF_HOME (NOT your $HOME)
+#
+# Overridable from the submit line, e.g.:
+#   ARC_ACCOUNT=myalloc PARTITION=h200_normal_q sbatch scripts/arc_sft.slurm
+#
+# No `set -e` here on purpose: the module/conda probes below are allowed to fail
+# over to their alternatives. The .slurm files set it for the run itself.
+
+# ---- site ----------------------------------------------------------------- #
+export ARC_ACCOUNT="${ARC_ACCOUNT:-personal}"        # sbatch --account
+export PROJECT_DIR="${PROJECT_DIR:-$SLURM_SUBMIT_DIR}"
+# Dataset namespace: every artifact (manifest, traces, checkpoints, episode
+# logs, results) lives under <root>/<VRR_DATASET>/, so substrates never
+# overwrite each other. Override per submit: VRR_DATASET=faces sbatch ...
+export VRR_DATASET="${VRR_DATASET:-genimage}"
+# Overview resolution — the third difficulty axis, alongside degradation and
+# budget. INSPECT's zoom factor is native_size/this. Every launcher passes it, so
+# setting it here keeps a run's stages consistent with each other.
+#
+# Do NOT pick it by ratio. "~native/7" was calibrated when overview resolution and
+# cell size were coupled — at 512px natives a harsher blur bought nothing, since
+# the 4x4 cells were already too small for INSPECT to reveal anything. Above
+# 1024px they are decoupled (the cell is native/4 regardless), so the blur can be
+# pushed much harder for free. On synth1024, native/7 (=140) left a floor of
+# 0.740; native/21 (=48) put it at chance. See results/substrate_synth1024.md.
+#
+# Choose it by sweeping the FLOOR gate and taking the mildest blur whose AUC
+# confidence interval contains 0.5. The ceiling is measured at native resolution
+# and is unaffected, so only the floor needs re-running.
+export OVERVIEW_LONG_EDGE="${OVERVIEW_LONG_EDGE:-140}"
+# Model weights are tens to hundreds of GB — keep the HF cache on project/scratch
+# storage, never in $HOME (small quota, and it is not purged-but-fast storage).
+export HF_HOME="${HF_HOME:-/projects/$USER/hf_cache}"
+export HF_HUB_ENABLE_HF_TRANSFER=1
+export TRANSFORMERS_VERBOSITY=warning
+export TOKENIZERS_PARALLELISM=false
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
+export PYTHONUNBUFFERED=1
+
+# ---- W&B ------------------------------------------------------------------ #
+# Credentials come from ONE of these, checked in order. Never put the key in
+# this file — it is tracked in git.
+#
+#   1. `wandb login` on the login node        -> writes ~/.netrc (recommended;
+#                                                $HOME is mounted on the compute
+#                                                nodes, so jobs inherit it)
+#   2. ~/.config/vrr/secrets.env              -> `export WANDB_API_KEY=...`,
+#                                                chmod 600, outside the repo
+#
+export WANDB_PROJECT="${WANDB_PROJECT:-visual-reasoning-rlvr}"
+# Run dirs hold the offline event log; keep them off the small $HOME quota for
+# the same reason as HF_HOME.
+export WANDB_DIR="${WANDB_DIR:-/projects/$USER/wandb}"
+export WANDB_CACHE_DIR="${WANDB_CACHE_DIR:-$WANDB_DIR/cache}"
+mkdir -p "$WANDB_DIR" 2>/dev/null || true
+# Never let a 48h job hang at startup on an unreachable W&B API.
+export WANDB_INIT_TIMEOUT="${WANDB_INIT_TIMEOUT:-60}"
+
+[ -f "$HOME/.config/vrr/secrets.env" ] && source "$HOME/.config/vrr/secrets.env"
+
+# Preflight: no credential, or no route to the API, means run OFFLINE rather
+# than fail or block. Offline runs are written to $WANDB_DIR and replayed later
+# with `wandb sync` from the login node — you lose live tracking, not the run.
+if [ -z "${WANDB_MODE:-}" ]; then
+  if [ -z "${WANDB_API_KEY:-}" ] && ! grep -qs "api.wandb.ai" "$HOME/.netrc"; then
+    echo "[arc_env] WARNING: no W&B credential (~/.netrc or WANDB_API_KEY) -> WANDB_MODE=offline"
+    export WANDB_MODE=offline
+  # Reachability, NOT HTTP status: api.wandb.ai answers 404 at / and 405 at
+  # /graphql, so `curl -f` would call a perfectly healthy API "unreachable" and
+  # force every run offline. http_code 000 is the real "no route" signal.
+  elif [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://api.wandb.ai/graphql 2>/dev/null)" = "000" ]; then
+    echo "[arc_env] WARNING: api.wandb.ai unreachable from $(hostname) -> WANDB_MODE=offline"
+    echo "[arc_env]          after the job: wandb sync $WANDB_DIR/offline-run-*"
+    export WANDB_MODE=offline
+  else
+    export WANDB_MODE=online
+  fi
+fi
+echo "[arc_env] wandb mode=${WANDB_MODE} project=${WANDB_PROJECT} dir=${WANDB_DIR}"
+
+# ---- Telegram notifications (optional) ------------------------------------- #
+# Jobs here queue for hours and then hinge on one number — a gate AUC, a keep
+# rate, usable_groups. Email tells you a job ended; this sends the number and the
+# log itself, so a decision can be made from a phone instead of from a login node.
+#
+# Setup, once:
+#   1. message @BotFather on Telegram, /newbot, keep the token
+#   2. message your new bot once, then:
+#        curl -s "https://api.telegram.org/bot<TOKEN>/getUpdates" | grep -o '"chat":{"id":[-0-9]*'
+#   3. put BOTH in ~/.config/vrr/secrets.env (chmod 600, outside the repo — this
+#      file is already sourced above, and is where the W&B key lives):
+#        export TELEGRAM_BOT_TOKEN=123456:AA...
+#        export TELEGRAM_CHAT_ID=987654321
+#
+# Every function no-ops silently when those are unset, and never fails a job:
+# a notification problem must not take down a 12-hour run.
+
+_arc_tg_ready() {
+  [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]
+}
+
+_arc_html_escape() {
+  sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+}
+
+# arc_notify "<text>" — one message. HTML parse mode, so <pre> works.
+arc_notify() {
+  _arc_tg_ready || return 0
+  curl -s -m 15 -o /dev/null \
+    -d chat_id="$TELEGRAM_CHAT_ID" -d parse_mode=HTML \
+    --data-urlencode text="$1" \
+    "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" 2>/dev/null || true
+}
+
+# The job's own stdout path, straight from SLURM rather than reconstructed —
+# each launcher names its output differently.
+_arc_logfile() {
+  [ -n "${SLURM_JOB_ID:-}" ] || return 1
+  scontrol show job "$SLURM_JOB_ID" 2>/dev/null \
+    | tr ' ' '\n' | sed -n 's/^StdOut=//p' | head -1
+}
+
+# arc_notify_log "<caption>" — the tail inline (readable at a glance) plus the
+# whole file as a document (readable properly, and searchable, from anywhere).
+arc_notify_log() {
+  _arc_tg_ready || return 0
+  local log tail_txt
+  log="$(_arc_logfile)"
+  if [ -f "$log" ]; then
+    # cut long lines: progress bars are one enormous line and would eat the
+    # 4096-character message limit on their own.
+    tail_txt="$(tail -n 30 "$log" | cut -c1-180 | tail -c 3000 | _arc_html_escape)"
+    arc_notify "$1"$'\n'"<pre>${tail_txt}</pre>"
+    curl -s -m 120 -o /dev/null \
+      -F chat_id="$TELEGRAM_CHAT_ID" -F caption="$1" -F document=@"$log" \
+      "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" 2>/dev/null || true
+  else
+    arc_notify "$1"$'\n'"(stdout not found)"
+  fi
+}
+
+# Install as: trap arc_notify_finish EXIT  — fires on success AND failure, which
+# is the point: a job that dies at 03:00 should say so.
+arc_notify_finish() {
+  local rc=$?
+  local mark
+  [ "$rc" -eq 0 ] && mark="OK" || mark="FAILED rc=$rc"
+  arc_notify_log "<b>${mark}</b> ${SLURM_JOB_NAME:-job} ${SLURM_JOB_ID:-?} · ${VRR_DATASET:-?} · $(date -u '+%d %b %H:%M')Z"
+  return "$rc"
+}
+
+# ---- modules / python ----------------------------------------------------- #
+# ARC uses Lmod. Adjust the module names to what `module spider cuda` reports on
+# the cluster you land on; the conda env is expected to hold the requirements.txt
+# TRAINING profile (torch built against this CUDA).
+#
+# `module reset` swaps in the CLUSTER's conda, which cannot see a personal
+# ~/miniconda3 root — so a bare env NAME that activates fine on the login node
+# resolves to nothing inside the job. Give CONDA_ENV an ABSOLUTE PATH:
+#
+#     CONDA_ENV=/home/$USER/miniconda3/envs/vrr sbatch scripts/arc_infer.slurm
+#
+module reset >/dev/null 2>&1 || true
+module load Miniforge3 >/dev/null 2>&1 || module load Anaconda3 >/dev/null 2>&1 || true
+
+export CONDA_ENV="${CONDA_ENV:-vrr}"
+if [ -x "$CONDA_ENV/bin/python" ]; then
+  # PY is the interpreter every launcher must use. Resolving `python` through
+  # PATH proved unreliable on ARC — a bare `python` here ran, printed nothing and
+  # exited 0, silently turning a GPU job into a 2-second no-op. Call PY directly.
+  export PY="$CONDA_ENV/bin/python"
+  # Absolute path: put it on PATH directly. `source activate` can report success
+  # in a non-interactive batch shell WITHOUT switching interpreters, so the ||
+  # fallback never fires and the job runs in `base` — which surfaces much later
+  # as a bare ModuleNotFoundError, after the GPU allocation is already spent.
+  export CONDA_PREFIX="$CONDA_ENV"
+  export PATH="$CONDA_ENV/bin:$PATH"
+else
+  eval "$(conda shell.bash hook 2>/dev/null)" || true
+  conda activate "$CONDA_ENV" && export PY="$(command -v python)" || {
+    echo "[arc_env] FATAL: cannot activate conda env '$CONDA_ENV'." >&2
+    echo "[arc_env]        Pass an absolute path: CONDA_ENV=/path/to/envs/vrr sbatch ..." >&2
+    return 1 2>/dev/null || exit 1
+  }
+fi
+
+# Verify rather than assume. This is the cheapest check in the pipeline and it
+# guards the most expensive resource. Note "$PY" -c, never a bare `python`.
+"$PY" -c '
+import os, sys
+env = os.environ.get("CONDA_ENV", "")
+print("[arc_env] python=" + sys.executable, flush=True)
+if os.path.isabs(env) and not sys.executable.startswith(os.path.realpath(env)) \
+   and not sys.executable.startswith(env):
+    sys.exit("[arc_env] FATAL: interpreter is not inside " + env)
+try:
+    import PIL  # cheap proxy for "requirements are installed here"
+except ImportError as e:
+    sys.exit("[arc_env] FATAL: %s in %s" % (e, sys.executable))
+' || { echo "[arc_env] FATAL: python check failed (PY=$PY)" >&2; return 1 2>/dev/null || exit 1; }
+
+# ---- which env, not just whether it activated --------------------------- #
+# The check above proves the interpreter is inside $CONDA_ENV and that PIL
+# imports. It does NOT prove this is the RIGHT env for this stage, and the three
+# envs are mutually exclusive by construction: vLLM 0.8.5 pins transformers
+# 4.51, TRL 1.9.2 needs 5.x. An SFT job submitted with the inference env gets
+# through activation, loads the model, and dies on an ImportError from inside
+# trl — after the 8-GPU allocation is already spent. That happened.
+#
+# Each launcher calls this right after sourcing, naming the imports its stage
+# cannot run without:
+#
+#     arc_require trl peft          # arc_sft.slurm, arc_grpo.slurm
+#     arc_require vllm              # arc_infer.slurm
+#     arc_require diffusers         # arc_synth.slurm
+#
+arc_require() {
+  [ $# -gt 0 ] || return 0
+  REQ="$*" "$PY" -c '
+import importlib, os, sys
+mods = os.environ["REQ"].split()
+missing = []
+for m in mods:
+    try:
+        importlib.import_module(m)
+    except ImportError:
+        missing.append(m)
+if missing:
+    env = os.environ.get("CONDA_ENV", "?")
+    sys.stderr.write(
+        "[arc_env] FATAL: this stage needs %s, missing from %s\n"
+        % (", ".join(missing), env))
+    sys.stderr.write(
+        "[arc_env]        vrr = vLLM (gates/probes/distill/eval) · "
+        "vrr-train = trl+peft (sft/grpo) · vrr-gen = diffusers (synth)\n")
+    sys.stderr.write("[arc_env]        Re-submit with CONDA_ENV pointing at the right one.\n")
+    sys.exit(1)
+print("[arc_env] requires " + " ".join(mods) + " — present", flush=True)
+' || { return 1 2>/dev/null || exit 1; }
+}
+
+cd "$PROJECT_DIR"
+
+# ---- distributed rendezvous ----------------------------------------------- #
+# One torchrun per node (srun --ntasks-per-node=1), torchrun spawns one process
+# per GPU. MASTER_ADDR must be a routable hostname of the first allocated node.
+export GPUS_PER_NODE="${SLURM_GPUS_ON_NODE:-$(nvidia-smi -L | wc -l)}"
+export MASTER_ADDR="$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)"
+export MASTER_PORT="${MASTER_PORT:-$((20000 + SLURM_JOB_ID % 20000))}"
+
+# ---- NCCL ------------------------------------------------------------------ #
+# ARC's A100/H200 nodes are InfiniBand; let NCCL use IB and disable the Ethernet
+# fallback that otherwise silently halves multi-node bandwidth. Flip
+# NCCL_DEBUG=INFO when a multi-node job hangs at the first collective.
+export NCCL_IB_DISABLE=0
+# NCCL's BOOTSTRAP is TCP even when IB carries the data, and the interface name
+# differs between node types: ib0 exists on the A100 nodes, not on the H200
+# (tc-xe*) ones. A stale name fails as
+#   ncclInternalError ... Bootstrap : no socket interface found
+# — and it fails AFTER every rank has loaded the model, so an 8-GPU allocation is
+# already spent. Probe, and fall back to NCCL's own detection rather than insisting.
+# NCCL's bootstrap needs an interface that is UP and carries an IPv4 address.
+# Merely existing in /sys/class/net is not enough: ib0 is PRESENT but
+# address-less on the H200 nodes, so an existence check passes and NCCL still
+# reports "Bootstrap : no socket interface found" — after every rank has loaded
+# the model. Test for an address, and otherwise pick the first real interface
+# that has one.
+_nccl_pick() {
+  local want="$1" name
+  if [ -n "$want" ] && ip -o -4 addr show dev "$want" 2>/dev/null | grep -q ' inet '; then
+    echo "$want"; return 0
+  fi
+  for name in $(ip -o -4 addr show 2>/dev/null | awk '{print $2}' | sort -u); do
+    case "$name" in lo|docker*|virbr*|veth*|br-*|cni*|flannel*) continue ;; esac
+    echo "$name"; return 0
+  done
+  return 1
+}
+if _nccl_if="$(_nccl_pick "${NCCL_SOCKET_IFNAME:-ib0}")"; then
+  export NCCL_SOCKET_IFNAME="$_nccl_if"
+  echo "[arc_env] NCCL_SOCKET_IFNAME=$NCCL_SOCKET_IFNAME"
+else
+  echo "[arc_env] WARNING no IPv4 interface found on $(hostname); leaving NCCL to guess." \
+       "Devices: $(ls /sys/class/net 2>/dev/null | tr '\n' ' ')"
+  unset NCCL_SOCKET_IFNAME
+fi
+unset _nccl_if
+# Renamed in torch 2.x; the old name still works but warns on every rank.
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
+# Intra-node NVLink topology is discovered automatically; P2P disable is only a
+# debugging crutch (export NCCL_P2P_DISABLE=1) — it costs a lot of throughput.
+
+echo "[arc_env] node=$(hostname) nodes=${SLURM_NNODES:-1} gpus/node=${GPUS_PER_NODE} \
+master=${MASTER_ADDR}:${MASTER_PORT} hf_home=${HF_HOME}"
+nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader || true
+
+# Launch helper: `arc_torchrun training/sft.py --model 32b`
+arc_torchrun() {
+  srun --ntasks-per-node=1 --cpus-per-task="${SLURM_CPUS_PER_TASK:-16}" \
+    torchrun \
+      --nnodes "${SLURM_NNODES:-1}" \
+      --nproc_per_node "${GPUS_PER_NODE}" \
+      --rdzv_id "${SLURM_JOB_ID}" \
+      --rdzv_backend c10d \
+      --rdzv_endpoint "${MASTER_ADDR}:${MASTER_PORT}" \
+      "$@"
+}

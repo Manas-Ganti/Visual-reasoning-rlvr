@@ -1,0 +1,18 @@
+# Single node, 8 GPUs, DeepSpeed ZeRO-2 — the default training shape.
+#   accelerate launch --config_file configs/accelerate_ds_zero2.yaml training/sft.py --model 32b
+# Override the GPU count without editing this file:
+#   accelerate launch --config_file ... --num_processes 4 ...
+compute_environment: LOCAL_MACHINE
+distributed_type: DEEPSPEED
+deepspeed_config:
+  deepspeed_config_file: configs/deepspeed_zero2.json
+  zero3_init_flag: false
+downcast_bf16: 'no'
+machine_rank: 0
+main_training_function: main
+mixed_precision: bf16
+num_machines: 1
+num_processes: 8
+rdzv_backend: static
+same_network: true
+use_cpu: false

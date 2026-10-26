@@ -4,6 +4,7 @@ import pytest
 
 from env.reward import (
     RewardConfig,
+    belief_brier_score,
     belief_coherence_score,
     compute_episode_reward,
     confident_wrong_penalty,
@@ -245,3 +246,128 @@ def test_reward_hacking_guard_incoherent_scores_low():
     faithful_total, _ = compute_episode_reward(faithful, REAL)
     incoherent_total, _ = compute_episode_reward(incoherent, REAL)
     assert faithful_total > incoherent_total
+
+
+# --------------------------------------------------------------------------- #
+# belief_brier — a proper scoring rule on the final P(fake)
+# --------------------------------------------------------------------------- #
+# GRPO run 1 stated ~0.95 confidence on essentially every episode while scoring
+# 53%, because nothing in the reward read the probability the agent had already
+# written down. These pin the properties that make that expensive.
+
+def _traj_with_belief(p_fake: float, verdict: str) -> Trajectory:
+    return traj_from_texts(
+        "OBSERVATION: a scene\nHYPOTHESIS: if AI, cell 6 warps\nACTION: INSPECT 6",
+        f"RECONCILIATION: CONFIRMED\nBELIEF_UPDATE: P(fake)={p_fake} because evidence\n"
+        f"ACTION: VERDICT {verdict} confidence=0.9",
+    )
+
+
+def test_brier_rewards_a_confident_correct_belief():
+    assert belief_brier_score(_traj_with_belief(1.0, AI), AI) == pytest.approx(1.0)
+
+
+def test_brier_punishes_a_confident_wrong_belief():
+    assert belief_brier_score(_traj_with_belief(1.0, AI), REAL) == pytest.approx(-1.0)
+
+
+def test_brier_gives_partial_credit_for_an_honest_hedge():
+    # 0.5 scores +0.5 either way — better than being confidently wrong, worse
+    # than being confidently right. That asymmetry is the whole point.
+    assert belief_brier_score(_traj_with_belief(0.5, AI), AI) == pytest.approx(0.5)
+    assert belief_brier_score(_traj_with_belief(0.5, REAL), REAL) == pytest.approx(0.5)
+
+
+def test_brier_hedge_beats_confident_wrong():
+    hedge = belief_brier_score(_traj_with_belief(0.5, REAL), AI)
+    loud = belief_brier_score(_traj_with_belief(0.02, REAL), AI)
+    assert hedge > loud
+
+
+def test_brier_is_zero_without_a_recorded_belief():
+    t = traj_from_texts("OBSERVATION: a scene\nACTION: VERDICT AI confidence=0.9")
+    assert belief_brier_score(t, AI) == 0.0
+
+
+def test_brier_appears_in_the_breakdown_and_the_sum_still_reconciles():
+    t = _traj_with_belief(0.9, AI)
+    total, b = compute_episode_reward(t, AI)
+    assert "belief_brier" in b
+    assert total == pytest.approx(sum(b.values()))
+
+
+# --------------------------------------------------------------------------- #
+# confident_wrong is asymmetric by verdict
+# --------------------------------------------------------------------------- #
+# Finding an artifact proves AI; finding none across cells that were never opened
+# proves very little. A wrong REAL is therefore the more culpable error.
+
+def test_wrong_real_costs_more_than_wrong_ai_at_equal_confidence():
+    cfg = RewardConfig()
+    wrong_real = confident_wrong_penalty(_traj_with_belief(0.1, REAL), AI, cfg)
+    wrong_ai = confident_wrong_penalty(_traj_with_belief(0.9, AI), REAL, cfg)
+    assert wrong_real < wrong_ai < 0
+    assert wrong_real == pytest.approx(wrong_ai * cfg.c_confident_wrong_real_mult)
+
+
+def test_correct_verdicts_still_pay_no_confidence_penalty():
+    cfg = RewardConfig()
+    assert confident_wrong_penalty(_traj_with_belief(0.9, AI), AI, cfg) == 0.0
+    assert confident_wrong_penalty(_traj_with_belief(0.1, REAL), REAL, cfg) == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# prediction_tracking is retired
+# --------------------------------------------------------------------------- #
+
+def test_always_confirmed_no_longer_earns_anything():
+    """Run 1 wrote CONFIRMED on 91% of reconciliations. The scorer still exists
+    for the eval breakdown, but its weight is 0 so it cannot be farmed."""
+    assert RewardConfig().w_prediction_tracking == 0.0
+    t = _traj_with_belief(0.9, AI)
+    _, b = compute_episode_reward(t, AI)
+    assert b["prediction_tracking"] == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# belief_coherence is disabled
+# --------------------------------------------------------------------------- #
+# The scorer is kept (and still tested above) because the term is meant to come
+# back once the policy uses the RECONCILIATION tags as the prompt now defines
+# them. Until a run demonstrates that, its WEIGHT must stay zero: in GRPO run 2
+# it penalised 1,367 sound belief updates that happened to be tagged CONFIRMED.
+
+def test_belief_coherence_contributes_nothing_by_default():
+    assert RewardConfig().w_belief_coherence == 0.0
+
+
+def test_run2_shaped_episode_no_longer_forfeits_reward():
+    """The exact shape run 2 produced 1,367 times: CONFIRMED written to mean
+    "I checked this", followed by a sensible drop in P(fake).
+
+    The term never subtracted — it paid 0.30 for agreeing with the tag and 0.00
+    otherwise. So this shape forfeited 0.30 that a tag-agreeing sibling earned,
+    which under GRPO's group-relative advantage is a real push away from it.
+    With the weight at zero the two shapes are level on this term."""
+    run2 = traj_from_texts(
+        "OBSERVATION: x\nHYPOTHESIS: h\nACTION: INSPECT 5",
+        "RECONCILIATION: CONFIRMED - the lettering is crisp and legible.\n"
+        "BELIEF_UPDATE: P(fake)=0.2\nACTION: VERDICT REAL confidence=0.8",
+    )
+    tag_agreeing = traj_from_texts(
+        "OBSERVATION: x\nHYPOTHESIS: h\nACTION: INSPECT 5",
+        "RECONCILIATION: CONFIRMED - the lettering is garbled.\n"
+        "BELIEF_UPDATE: P(fake)=0.8\nACTION: VERDICT AI confidence=0.8",
+    )
+    # the scorer still reports the raw disagreement — disabled, not deleted
+    assert belief_coherence_score(run2) == 0.0
+    assert belief_coherence_score(tag_agreeing) == 1.0
+
+    old = RewardConfig(w_belief_coherence=0.30)
+    gap_before = (compute_episode_reward(tag_agreeing, AI, old)[1]["belief_coherence"]
+                  - compute_episode_reward(run2, REAL, old)[1]["belief_coherence"])
+    assert gap_before == pytest.approx(0.30)
+
+    gap_now = (compute_episode_reward(tag_agreeing, AI)[1]["belief_coherence"]
+               - compute_episode_reward(run2, REAL)[1]["belief_coherence"])
+    assert gap_now == 0.0

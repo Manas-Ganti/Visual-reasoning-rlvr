@@ -4,6 +4,9 @@ data/images/
 data/processed_images/
 data/raw_data/
 data/*.jsonl
+# Dataset-namespaced artifacts (VRR_DATASET): data/<ds>/{images,*.jsonl}
+data/*/images/
+data/**/*.jsonl
 
 # --- Local config ---
 .claude/
@@ -30,3 +33,6 @@ env-venv/
 *.swp
 .idea/
 .vscode/
+
+# --- Local download config (scripts/fetch_genimage.sh --init-links) ---
+genimage_links.txt

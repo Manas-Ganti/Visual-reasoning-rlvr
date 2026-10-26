@@ -168,3 +168,51 @@ def test_unanswered_trajectory():
     t = _traj("OBSERVATION: x\nACTION: INSPECT 5")
     assert t.answered is False
     assert t.final_verdict is None
+
+
+# --------------------------------------------------------------------------- #
+# Markdown emphasis around labels
+# --------------------------------------------------------------------------- #
+# The SFT-trained policy writes "**ACTION:**" with the value on the next line far
+# more often than the spec's plain "ACTION: ...". Before strip_emphasis every one
+# of those turns parsed INVALID — the action line captured "**" — which cost the
+# episode its verdict and handed it the -1.00 no-answer penalty despite sound
+# reasoning. Regression-guard the shapes actually observed in rollouts.
+
+def test_markdown_action_label_parses():
+    e = parse_turn("**ACTION:**\nINSPECT 6\n")
+    assert e.action_type == INSPECT
+    assert e.cell == 6
+
+
+def test_markdown_action_same_line_parses():
+    e = parse_turn("**ACTION:** INSPECT 6\n")
+    assert e.action_type == INSPECT and e.cell == 6
+
+
+def test_markdown_verdict_keeps_confidence():
+    e = parse_turn("**ACTION:**\nVERDICT AI confidence=0.8\n")
+    assert e.action_type == VERDICT
+    assert e.verdict == "AI"
+    assert abs(e.confidence - 0.8) < 1e-9
+
+
+def test_underscore_emphasis_parses():
+    e = parse_turn("__ACTION:__ INSPECT 12\n")
+    assert e.action_type == INSPECT and e.cell == 12
+
+
+def test_emphasised_fields_still_yield_belief_and_reconciliation():
+    e = parse_turn(
+        "**RECONCILIATION:** CONFIRMED — the bark was too regular.\n"
+        "**BELIEF_UPDATE:** P(fake)=0.75 because the texture repeats.\n"
+        "**ACTION:**\nINSPECT 3\n"
+    )
+    assert abs(e.p_fake - 0.75) < 1e-9
+    assert e.reconciliation == CONFIRMED
+    assert e.action_type == INSPECT and e.cell == 3
+
+
+def test_plain_format_unaffected():
+    e = parse_turn("ACTION: INSPECT 6\n")
+    assert e.action_type == INSPECT and e.cell == 6

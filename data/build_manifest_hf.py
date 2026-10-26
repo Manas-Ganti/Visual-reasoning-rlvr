@@ -1,0 +1,564 @@
+"""Build a manifest by STREAMING a paired real/fake dataset off the Hugging Face Hub.
+
+No archives, no Drive quota, no unzipping. ``load_dataset(..., streaming=True)``
+pulls images one at a time and stops as soon as enough have been kept, so a
+400-per-class build transfers well under a gigabyte regardless of how large the
+source repo is.
+
+    python data/build_manifest_hf.py \\
+        --real bitmind/MS-COCO-unique \\
+        --fake bitmind/MS-COCO-unique___FLUX.1-dev \\
+        --dataset cocoflux --per-class 400
+
+Prefer **paired** repos — bitmind's ``<real>___<generator>`` convention means the
+fakes were generated from that real set's captions, so subject matter is matched
+by construction. Pairing an arbitrary generator against an arbitrary photo set
+adds a content-style shortcut ("arty-looking = fake") on top of whatever else is
+being measured.
+
+WHAT THIS DELIBERATELY DOES NOT DO
+----------------------------------
+It never RESIZES or re-encodes lossily. Resampling invents frequency content the
+source never had, and since the two classes would be resampled from different
+starting sizes, it manufactures exactly the kind of shortcut this build exists to
+avoid. Images are written as decoded, PNG by default.
+
+``--center-crop N`` is the one exception, and it is a different operation:
+cropping *selects* pixels and invents nothing, so the artifacts the task depends
+on survive untouched while every image ends up N x N. Use it when the two classes
+cannot be matched by selection alone — on GenImage the generated half is uniformly
+512x512 while the real half is varied and slightly smaller, which makes AREA a
+0.85-AUC predictor of the label all by itself (check with
+``tools/manifest_stats.py``). Size sails through the overview downsample intact,
+and Qwen bins images to a patch grid, so different sizes even reach the model as
+different token counts. Cropping both classes to a common N deletes that channel.
+
+The other levers are *selection* (``--min-edge``, ``--aspect-range``) — pick
+different images, never alter them.
+
+That matters because the failure mode here is a shortcut, not a lack of signal:
+if every fake is a 1024x1024 square and every real is a 500x375 rectangle, aspect
+ratio alone predicts the label, survives the overview downsample untouched, and
+the agent never needs to investigate at all. So the build prints a per-class
+dimension and aspect summary and warns when the two halves look separable
+without opening the image. Fix that by choosing better-matched sources or by
+filtering, and confirm with ``tools/ceiling_probe.py --condition overview``.
+
+Emits the same schema every other stage consumes::
+
+    {"id", "file_name" (repo-relative), "label" (0 real / 1 AI), "split", "generator"}
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import random
+import statistics
+import sys
+from collections import Counter, defaultdict
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from training import common  # noqa: E402
+
+
+def pick_image_column(ds, override: str | None) -> str:
+    """Find the PIL-image column. Most of these repos call it ``image``."""
+    if override:
+        return override
+    features = getattr(ds, "features", None) or {}
+    for name, feat in features.items():
+        if type(feat).__name__ == "Image":
+            return name
+    for name in ("image", "img", "png", "jpg"):
+        if name in features:
+            return name
+    raise SystemExit(
+        f"Could not find an image column. Columns: {sorted(features)}. "
+        f"Pass --image-column."
+    )
+
+
+def center_crop_to(img, n: int):
+    """Center-crop to ``n`` x ``n``. Selects pixels; resamples nothing."""
+    w, h = img.size
+    left, top = (w - n) // 2, (h - n) // 2
+    return img.crop((left, top, left + n, top + n))
+
+
+def stream_class(repo, split, config, image_col, want, min_edge, aspect_range,
+                 out_dir, prefix, fmt, survey=False, label_col=None, keep_label=None,
+                 center_crop=None):
+    """Stream ``repo`` and save the first ``want`` images that pass the filters.
+
+    Returns (paths, dims, rejected) where dims is a list of (w, h). Stops reading
+    as soon as ``want`` images are kept — the whole point of streaming.
+    """
+    import time
+
+    from datasets import load_dataset
+
+    t0 = time.time()
+    print(f"    connecting to {repo}"
+          f"{f' [{config}]' if config else ''} split={split} ...", flush=True)
+    ds = load_dataset(repo, name=config, split=split, streaming=True)
+    col = pick_image_column(ds, image_col)
+
+    if not survey:
+        os.makedirs(out_dir, exist_ok=True)
+    paths, dims = [], []
+    rejected = Counter()
+    seen = 0
+
+    # Abandoning a streaming iterator mid-shard leaves HF's background reader
+    # thread alive, and its teardown aborts the interpreter with
+    # "PyGILState_Release: thread state must be current". Harmless to the data —
+    # everything is already written — but it exits NONZERO, which would make a
+    # SLURM launcher treat a successful build as a failure. Close it explicitly.
+    it = iter(ds)
+    for row in it:
+        if len(dims if survey else paths) >= want:
+            break
+        seen += 1
+        # Single-repo datasets carry both classes with a label column; take only
+        # the rows for the class being streamed.
+        if label_col is not None and row.get(label_col) != keep_label:
+            continue
+        img = row.get(col)
+        if img is None:
+            rejected["no_image"] += 1
+            continue
+        try:
+            img = img.convert("RGB")
+        except Exception:
+            rejected["unreadable"] += 1
+            continue
+
+        if seen % 2000 == 0:
+            print(f"    ...read {seen} rows, kept {len(paths)} "
+                  f"({time.time() - t0:.0f}s)", flush=True)
+
+        w, h = img.size
+        # Survey: record the geometry of everything, filter nothing, write
+        # nothing. This is how you find out what a candidate repo actually
+        # holds before committing to it.
+        if survey:
+            dims.append((w, h))
+            # Report the first image immediately, then every 25. A stream that
+            # only speaks every 100 images is indistinguishable from a hang, and
+            # the first row is the one that proves the connection works at all.
+            if len(dims) == 1 or len(dims) % 25 == 0:
+                print(f"    surveyed {len(dims)}/{want}  ({w}x{h}, "
+                      f"{time.time() - t0:.0f}s)", flush=True)
+            continue
+        if min(w, h) < min_edge:
+            rejected["too_small"] += 1
+            continue
+        if aspect_range is not None:
+            lo, hi = aspect_range
+            if not lo <= (w / h) <= hi:
+                rejected["aspect"] += 1
+                continue
+
+        if center_crop:
+            if min(w, h) < center_crop:
+                rejected["too_small_for_crop"] += 1
+                continue
+            img = center_crop_to(img, center_crop)
+            w, h = img.size          # record what is WRITTEN, so the shortcut
+                                     # report describes the images the model sees
+
+        name = f"{prefix}_{len(paths):06d}.{fmt}"
+        path = os.path.join(out_dir, name)
+        # Lossless by default: whatever the source encoder did is preserved in
+        # the decoded pixels, and both classes are written identically, so
+        # storage adds no signal either way.
+        img.save(path, quality=95) if fmt == "jpg" else img.save(path)
+        paths.append(path)
+        dims.append((w, h))
+
+        if len(paths) == 1 or len(paths) % 25 == 0:
+            print(f"    kept {len(paths)}/{want} (seen {seen}, "
+                  f"{time.time() - t0:.0f}s)", flush=True)
+
+    for _closer in (getattr(it, "close", None),):
+        if _closer is not None:
+            try:
+                _closer()
+            except Exception:
+                pass
+    del it, ds
+
+    if not survey and len(paths) < want:
+        print(f"  ! only kept {len(paths)}/{want} from {repo} after {seen} rows "
+              f"— rejected {dict(rejected)}")
+        if rejected.get("too_small"):
+            print(f"    {rejected['too_small']} were under --min-edge {min_edge}. "
+                  f"Run with --survey to see what sizes this repo actually holds.")
+        if rejected.get("too_small_for_crop"):
+            print(f"    {rejected['too_small_for_crop']} were under --center-crop "
+                  f"{center_crop}. Lower it, or raise --min-edge to match.")
+    return paths, dims, rejected
+
+
+def summarize_dims(dims: list[tuple[int, int]]) -> dict:
+    """Short-edge and aspect-ratio distribution for one class."""
+    if not dims:
+        return {}
+    short = sorted(min(w, h) for w, h in dims)
+    aspect = sorted(w / h for w, h in dims)
+    mid = lambda xs: statistics.median(xs)  # noqa: E731
+    return {
+        "n": len(dims),
+        "short_min": short[0], "short_med": int(mid(short)), "short_max": short[-1],
+        "aspect_min": round(aspect[0], 3),
+        "aspect_med": round(mid(aspect), 3),
+        "aspect_max": round(aspect[-1], 3),
+        "square_frac": round(sum(0.95 <= a <= 1.05 for a in aspect) / len(aspect), 3),
+        "dims": dims,
+    }
+
+
+def add_pass_frac(summary: dict, min_edge: int) -> dict:
+    """Share of images that would survive --min-edge — answers "will the real
+    build find enough?" without running it."""
+    if summary:
+        dims = summary["dims"]
+        summary["pass_frac"] = round(sum(min(w, h) >= min_edge for w, h in dims) / len(dims), 3)
+    return summary
+
+
+def shortcut_warnings(real: dict, fake: dict) -> list[str]:
+    """Ways the two halves might be separable WITHOUT looking at the image.
+
+    Anything here survives the environment's overview downsample, which is what
+    makes it fatal rather than merely untidy: the agent could answer correctly
+    from the blurred overview and never spend an inspect.
+    """
+    out = []
+    if not real or not fake:
+        return out
+
+    if abs(real["aspect_med"] - fake["aspect_med"]) > 0.15:
+        out.append(
+            f"aspect ratio: real median {real['aspect_med']} vs fake "
+            f"{fake['aspect_med']} — shape alone may predict the label")
+    if abs(real["square_frac"] - fake["square_frac"]) > 0.5:
+        out.append(
+            f"squareness: {real['square_frac']:.0%} of real vs "
+            f"{fake['square_frac']:.0%} of fake are square — a near-perfect giveaway")
+    # Disjoint alone is not enough: a dataset whose images are all exactly 1.25
+    # and one that is all exactly 1.28 technically never overlap, and nothing is
+    # learnable from 0.03. Require a real margin between the two ranges.
+    gap = max(real["aspect_min"], fake["aspect_min"]) - min(real["aspect_max"], fake["aspect_max"])
+    if gap > 0.10:
+        out.append(f"aspect ranges are disjoint by {gap:.2f} — trivially separable")
+
+    lo, hi = sorted((real["short_med"], fake["short_med"]))
+    if hi >= 2 * lo:
+        out.append(
+            f"resolution: real median short edge {real['short_med']}px vs fake "
+            f"{fake['short_med']}px — partly hidden by the VLM's token budget, "
+            f"but worth checking with the floor probe")
+    return out
+
+
+MIN_USEFUL_GAIN = 4.0   # faces failed at 2.1x; 7x is the design target
+
+
+def report_dimensions(r_sum: dict, f_sum: dict, min_edge: int,
+                      overview_long_edge: int = 140) -> None:
+    """The check that decides whether a substrate is honest.
+
+    Two questions at once: are the images big enough for INSPECT to reveal
+    anything (short edge), and is the label predictable without opening the
+    image (aspect / squareness)?
+    """
+    print("\n=== dimensions (is the label predictable WITHOUT looking?) ===")
+    print(f"  {'class':<6}{'n':>6}{'short edge min/med/max':>26}"
+          f"{'aspect min/med/max':>24}{'square':>8}{'>=' + str(min_edge):>10}")
+    for name, s in (("real", r_sum), ("ai", f_sum)):
+        if not s:
+            print(f"  {name:<6}{'(none)':>6}")
+            continue
+        edge = "{}/{}/{}".format(s["short_min"], s["short_med"], s["short_max"])
+        asp = "{}/{}/{}".format(s["aspect_min"], s["aspect_med"], s["aspect_max"])
+        print(f"  {name:<6}{s['n']:>6}{edge:>26}{asp:>24}"
+              f"{s['square_frac']:>8.0%}{s.get('pass_frac', 0):>10.0%}")
+
+    # Resolution is only meaningful RELATIVE to the overview: what INSPECT buys
+    # is native/overview_long_edge, so there is no absolute pixel threshold.
+    # 1024 vs an overview of 140 and 512 vs 70 are the same 7.3x zoom. Faces
+    # failed at 2.1x (results/faces_negative_result.md).
+    print(f"\n  INSPECT zoom factor at --overview-long-edge {overview_long_edge} "
+          f"(target ~7x, unusable below {MIN_USEFUL_GAIN}x):")
+    worst = None
+    for name, s in (("real", r_sum), ("ai", f_sum)):
+        if not s:
+            continue
+        gain = s["short_med"] / overview_long_edge
+        cell = s["short_med"] // 4
+        flag = "" if gain >= MIN_USEFUL_GAIN else "   <-- too low"
+        print(f"    {name:<5} {s['short_med']:>5}px / {overview_long_edge} = "
+              f"{gain:>4.1f}x   (cell {cell}px){flag}")
+        worst = gain if worst is None else min(worst, gain)
+    if worst is not None and worst < MIN_USEFUL_GAIN:
+        need = int(min(s["short_med"] for s in (r_sum, f_sum) if s) / 7)
+        print(f"    -> INSPECT would upscale a blur. Either use larger images, or blur")
+        print(f"       the overview harder: --overview-long-edge {need} would give ~7x.")
+
+    warnings = shortcut_warnings(r_sum, f_sum)
+    if warnings:
+        print("\n  ⚠ SHORTCUT RISK — these survive the overview downsample:")
+        for w in warnings:
+            print(f"    - {w}")
+        print("    Any of these lets the agent answer from the blurred overview without")
+        print("    investigating, which makes a high pass rate meaningless. Fix by")
+        print("    choosing better-matched sources, or filter with --aspect-range.")
+    elif r_sum and f_sum:
+        print("\n  no obvious shortcut: the two classes look alike in shape and size.")
+
+
+def scan_written(img_root: str) -> tuple[list[str], list[str]]:
+    """Image paths already on disk, so the manifest step is independent of which
+    process streamed them."""
+    out = []
+    for sub in ("real", "ai"):
+        d = os.path.join(img_root, sub)
+        files = sorted(os.path.join(d, f) for f in os.listdir(d)) if os.path.isdir(d) else []
+        out.append(files)
+    return out[0], out[1]
+
+
+def dims_of(paths: list[str]) -> list[tuple[int, int]]:
+    from PIL import Image as _Image
+
+    dims = []
+    for p in paths:
+        try:
+            with _Image.open(p) as im:
+                dims.append(im.size)
+        except Exception:
+            pass
+    return dims
+
+
+def assign_splits(rows, val: float, test: float, seed: int) -> None:
+    """Stratified by (generator, label), matching build_manifest_genimage."""
+    rng = random.Random(seed)
+    by_stratum = defaultdict(list)
+    for r in rows:
+        by_stratum[(r["generator"], r["label"])].append(r)
+    for stratum in by_stratum.values():
+        rng.shuffle(stratum)
+        n = len(stratum)
+        n_val = max(1, int(n * val)) if n >= 10 else 0
+        n_test = max(1, int(n * test)) if n >= 10 else 0
+        for i, r in enumerate(stratum):
+            r["split"] = "val" if i < n_val else ("test" if i < n_val + n_test else "train")
+
+
+def write_manifest(args, generator, real_paths, fake_paths, real_dims, fake_dims):
+    """Emit the manifest + the dimension report. Shared by the streaming path and
+    --finalize, so a manifest built from disk is identical to one built in-process."""
+    if not real_paths or not fake_paths:
+        raise SystemExit("One class is empty — check --min-edge, the splits, and that "
+                         "both halves actually streamed (--only real / --only ai).")
+
+    rows = []
+    for label, paths in ((0, real_paths), (1, fake_paths)):
+        sub = "ai" if label else "real"
+        for i, p in enumerate(paths):
+            rows.append({
+                "id": f"{generator}_{sub}_{i:06d}",
+                "file_name": os.path.relpath(p, common.REPO_ROOT),
+                "label": label,
+                "generator": generator,
+            })
+
+    assign_splits(rows, args.val, args.test, args.seed)
+    rows.sort(key=lambda r: r["id"])
+
+    manifest = args.out or common.manifest_path(args.dataset)
+    os.makedirs(os.path.dirname(os.path.abspath(manifest)), exist_ok=True)
+    with open(manifest, "w") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+
+    labels = Counter(r["label"] for r in rows)
+    splits = Counter(r["split"] for r in rows)
+    print(f"\nWrote {len(rows)} rows -> {manifest}")
+    print(f"  splits {dict(splits)}")
+    print(f"  labels AI={labels[1]} REAL={labels[0]} "
+          f"(majority baseline {max(labels.values()) / len(rows):.3f})")
+
+    report_dimensions(add_pass_frac(summarize_dims(real_dims), args.min_edge),
+                      add_pass_frac(summarize_dims(fake_dims), args.min_edge),
+                      args.min_edge, args.overview_long_edge)
+
+    print("\nNext — confirm it empirically before training anything:")
+    print(f"  VRR_DATASET={args.dataset} python tools/ceiling_probe.py "
+          "--backend vllm --tensor-parallel-size 2 --condition full     # want >=0.85")
+    print(f"  VRR_DATASET={args.dataset} python tools/ceiling_probe.py "
+          "--backend vllm --tensor-parallel-size 2 --condition overview  # want ~chance")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--real", default=None, help="HF dataset id holding REAL images.")
+    ap.add_argument("--fake", default=None, help="HF dataset id holding AI images.")
+    ap.add_argument("--repo", default=None,
+                    help="ONE dataset holding both classes, split by --label-column. "
+                         "Use instead of --real/--fake.")
+    ap.add_argument("--label-column", default="label",
+                    help="With --repo: the column separating the classes.")
+    ap.add_argument("--real-value", default="0",
+                    help="With --repo: --label-column value meaning REAL (int if numeric).")
+    ap.add_argument("--fake-value", default="1",
+                    help="With --repo: --label-column value meaning AI.")
+    ap.add_argument("--dataset", required=True,
+                    help="Local namespace: data/<dataset>/, checkpoints/<dataset>/, ...")
+    ap.add_argument("--generator", default=None,
+                    help="Generator tag for the manifest rows (default: inferred from --fake).")
+    ap.add_argument("--per-class", type=int, default=400, help="Images kept PER CLASS.")
+    ap.add_argument("--real-split", default="train")
+    ap.add_argument("--fake-split", default="train")
+    ap.add_argument("--real-config", default=None)
+    ap.add_argument("--fake-config", default=None)
+    ap.add_argument("--image-column", default=None,
+                    help="Override the auto-detected PIL image column.")
+    ap.add_argument("--min-edge", type=int, default=512,
+                    help="Reject images whose short edge is under this — a 4x4 cell "
+                         "must still carry real detail after cropping.")
+    ap.add_argument("--aspect-range", default=None,
+                    help="Keep only images with LO<=w/h<=HI, e.g. 0.9,1.1. A filter, "
+                         "not a transform: it selects matching images rather than "
+                         "cropping anything. Use when the shortcut warnings fire.")
+    ap.add_argument("--center-crop", type=int, default=None,
+                    help="Center-crop every kept image to N x N, both classes alike. "
+                         "The one transform this build allows: it selects pixels and "
+                         "resamples nothing, so artifacts survive while AREA, LONG EDGE "
+                         "and ASPECT stop predicting the label. Needs N <= --min-edge. "
+                         "Verify with tools/manifest_stats.py — every predictor should "
+                         "fall to ~0.5.")
+    ap.add_argument("--format", choices=["png", "jpg"], default="png",
+                    help="png (default) is lossless. jpg is ~8x smaller and, applied "
+                         "identically to both classes, also flattens any difference "
+                         "in the sources' compression history.")
+    ap.add_argument("--out", default=None, help="Manifest path (default: data/<ds>/manifest.jsonl).")
+    ap.add_argument("--val", type=float, default=0.1)
+    ap.add_argument("--test", type=float, default=0.1)
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--overview-long-edge", type=int, default=140,
+                    help="The overview resolution these images will be used with. Only "
+                         "the ratio native/overview matters, so this decides whether a "
+                         "given size is usable: 1024 with 140 and 512 with 70 are the "
+                         "same 7x zoom. Must match what you pass to the training scripts.")
+    ap.add_argument("--only", choices=["real", "ai", "both"], default="both",
+                    help="Stream one class and stop. Two streams in one process can "
+                         "collide — webdataset sources leave background readers alive "
+                         "that the next load_dataset contends with — and a stall on the "
+                         "second half would otherwise discard the first. Run "
+                         "--only real, then --only ai, then --finalize.")
+    ap.add_argument("--finalize", action="store_true",
+                    help="Write the manifest from images already on disk. No streaming.")
+    ap.add_argument("--survey", action="store_true",
+                    help="Report each class's dimensions and stop. Writes no images and "
+                         "no manifest, ignores --min-edge/--aspect-range. Use it to screen "
+                         "a candidate pair in seconds before committing to it.")
+    ap.add_argument("--survey-n", type=int, default=200,
+                    help="Images sampled per class in --survey mode.")
+    args = ap.parse_args()
+
+    if args.center_crop and args.center_crop > args.min_edge:
+        raise SystemExit(
+            f"--center-crop {args.center_crop} exceeds --min-edge {args.min_edge}: "
+            f"every image would be rejected as too small to crop. Raise --min-edge "
+            f"to at least {args.center_crop}, or lower the crop.")
+
+    def _coerce(v):
+        try:
+            return int(v)
+        except ValueError:
+            return v
+
+    if args.repo:
+        if args.real or args.fake:
+            raise SystemExit("Use --repo OR --real/--fake, not both.")
+        args.real = args.fake = args.repo
+        real_label, fake_label = _coerce(args.real_value), _coerce(args.fake_value)
+        label_col = args.label_column
+    elif args.real and args.fake:
+        real_label = fake_label = label_col = None
+    else:
+        raise SystemExit("Need either --repo, or both --real and --fake.")
+
+    generator = args.generator or args.fake.split("/")[-1].split("___")[-1].lower()
+    aspect_range = None
+    if args.aspect_range:
+        lo, hi = (float(x) for x in args.aspect_range.split(","))
+        aspect_range = (lo, hi)
+
+    img_root = os.path.join(common.images_dir(args.dataset), generator)
+    fmt = args.format
+
+    print(f"Streaming real={args.real} fake={args.fake} -> generator={generator!r}")
+    print(f"  per-class={args.per_class} min_edge={args.min_edge} "
+          f"aspect_range={aspect_range} format={fmt}")
+
+    want = args.survey_n if args.survey else args.per_class
+
+    if args.finalize:
+        real_paths, fake_paths = scan_written(img_root)
+        print(f"Finalizing from disk: {len(real_paths)} real, {len(fake_paths)} ai")
+        real_dims, fake_dims = dims_of(real_paths), dims_of(fake_paths)
+        write_manifest(args, generator, real_paths, fake_paths, real_dims, fake_dims)
+        return
+
+    real_paths = fake_paths = []
+    real_dims = fake_dims = []
+
+    if args.only in ("real", "both"):
+        print(f"  [real] {args.real}")
+        real_paths, real_dims, _ = stream_class(
+            args.real, args.real_split, args.real_config, args.image_column,
+            want, args.min_edge, aspect_range,
+            os.path.join(img_root, "real"), "real", fmt, survey=args.survey,
+            label_col=label_col, keep_label=real_label,
+            center_crop=args.center_crop)
+
+    if args.only in ("ai", "both"):
+        print(f"  [ai]   {args.fake}")
+        fake_paths, fake_dims, _ = stream_class(
+            args.fake, args.fake_split, args.fake_config, args.image_column,
+            want, args.min_edge, aspect_range,
+            os.path.join(img_root, "ai"), "ai", fmt, survey=args.survey,
+            label_col=label_col, keep_label=fake_label,
+            center_crop=args.center_crop)
+
+    if args.survey:
+        report_dimensions(add_pass_frac(summarize_dims(real_dims), args.min_edge),
+                          add_pass_frac(summarize_dims(fake_dims), args.min_edge),
+                          args.min_edge, args.overview_long_edge)
+        return
+
+    if args.only != "both":
+        done = "real" if args.only == "real" else "ai"
+        other = "ai" if done == "real" else "real"
+        print(f"\n{len(real_paths or fake_paths)} {done} images written to {img_root}/{done}")
+        print(f"Next:  --only {other}   (then --finalize to write the manifest)")
+        return
+
+    write_manifest(args, generator, real_paths, fake_paths, real_dims, fake_dims)
+
+
+if __name__ == "__main__":
+    main()
+    # Belt and braces on the same issue: everything is written and flushed by
+    # now, so skip interpreter finalization rather than let a lingering reader
+    # thread turn a completed build into a nonzero exit.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)

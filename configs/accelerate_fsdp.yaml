@@ -1,0 +1,29 @@
+# Single node, 8 GPUs, FSDP (full shard) — the non-DeepSpeed alternative.
+# Kept because FSDP tends to be the smoother path when a DeepSpeed build fights
+# the cluster's CUDA/NCCL, and it needs no compiled ops. Transformer layers are
+# wrapped by class name; Qwen2.5-VL uses Qwen2_5_VLDecoderLayer for the language
+# tower (adjust if you switch model families).
+#   accelerate launch --config_file configs/accelerate_fsdp.yaml training/sft.py --model 32b
+compute_environment: LOCAL_MACHINE
+distributed_type: FSDP
+fsdp_config:
+  fsdp_activation_checkpointing: true
+  fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
+  fsdp_transformer_layer_cls_to_wrap: Qwen2_5_VLDecoderLayer
+  fsdp_backward_prefetch: BACKWARD_PRE
+  fsdp_cpu_ram_efficient_loading: true
+  fsdp_offload_params: false
+  fsdp_reshard_after_forward: true
+  fsdp_state_dict_type: FULL_STATE_DICT
+  fsdp_sync_module_states: true
+  fsdp_use_orig_params: true
+  fsdp_version: 2
+downcast_bf16: 'no'
+machine_rank: 0
+main_training_function: main
+mixed_precision: bf16
+num_machines: 1
+num_processes: 8
+rdzv_backend: static
+same_network: true
+use_cpu: false

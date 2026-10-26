@@ -3,11 +3,11 @@
 # Two install profiles:
 #   * CORE (env + reward + tests + demo): CPU-only, no GPU needed. This is what
 #     CI installs to run the reward tests. Everything above the TRAINING marker.
-#   * TRAINING/INFERENCE (SFT, GRPO, vLLM, distillation): needs a CUDA GPU
-#     (A100 target). Everything below.
+#   * TRAINING/INFERENCE (SFT, GRPO, vLLM, distillation): needs CUDA GPUs
+#     (A100-80GB / H200 target, single or multi-node). Everything below.
 #
 # The ML stack is intentionally lower-bounded (>=) rather than pinned so it
-# resolves against whatever CUDA/torch build the A100 host provides; pin exact
+# resolves against whatever CUDA/torch build the cluster provides; pin exact
 # versions in the Dockerfile for reproducibility.
 
 # ------------------------- CORE (CPU, CI) ------------------------- #
@@ -19,14 +19,22 @@ gradio>=5.0          # demo/app.py trajectory viewer
 scipy>=1.11          # optional: McNemar p-value in eval/harness.py
 
 # --------------------- TRAINING / INFERENCE (CUDA) --------------------- #
-torch>=2.4
-torchvision>=0.19    # transformers routes image processors through it
-transformers>=4.49   # Qwen2-VL support
+torch>=2.6
+torchvision>=0.21    # transformers routes image processors through it
+transformers>=4.51   # Qwen2.5-VL support
 trl>=0.29            # GRPOTrainer + custom rollout_func; SFTTrainer (vision)
-peft>=0.13           # LoRA adapters
-accelerate>=1.0
+peft>=0.14           # LoRA adapters
+accelerate>=1.4      # launcher + DeepSpeed/FSDP plumbing
+deepspeed>=0.16      # ZeRO-2/3 sharding for the 32B/72B tiers
 datasets>=3.0
-vllm>=0.6            # fast offline inference for eval + SFT-trace distillation
+vllm>=0.8            # tensor-parallel offline inference (eval + distillation)
 wandb>=0.18          # experiment logging (all stages)
 kagglehub>=0.3       # dataset download in data/build_manifest.py
-qwen-vl-utils>=0.0.8 # Qwen2-VL image preprocessing helpers
+qwen-vl-utils>=0.0.8 # Qwen2.5-VL image preprocessing helpers
+hf-transfer>=0.1     # faster weight downloads (72B is ~145GB)
+
+# Optional but recommended on A100/H200: FlashAttention-2 is a large memory win
+# for multi-image contexts. It is a source build against your exact torch/CUDA,
+# so it is left out of the resolver — `training/common.py` detects it and falls
+# back to SDPA when absent.
+#   pip install flash-attn --no-build-isolation
