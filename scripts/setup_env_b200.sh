@@ -39,13 +39,16 @@ PY="$ENV/bin/python"
   "transformers==5.15.0" "trl==1.9.2" "peft==0.20.0" "accelerate==1.14.0" "deepspeed==0.19.5" \
   "datasets>=4.7" wandb "numpy>=1.26,<2.3" "pillow>=10.0" "gymnasium>=1.0" "scipy>=1.11"
 
-# Import check (no GPU needed). The trainer module, not bare trl: see arc_require.
+# Login-node check. Login nodes have no GPU, and importing deepspeed (which the
+# TRL trainer modules pull in) starts triton, which dies there with
+# "RuntimeError: 0 active drivers ([])". That is the node, not the env. So only
+# versions are checked here; scripts/arc_check.slurm imports the trainer on a GPU.
 "$PY" - <<'EOF'
-import torch, transformers, trl, peft, deepspeed
-import trl.trainer.grpo_trainer, trl.trainer.sft_trainer  # noqa: F401
+from importlib.metadata import version
+import torch, transformers, peft
 print(f"[setup] torch {torch.__version__} (CUDA {torch.version.cuda}) · transformers "
-      f"{transformers.__version__} · trl {trl.__version__} · peft {peft.__version__} · "
-      f"deepspeed {deepspeed.__version__}")
+      f"{transformers.__version__} · trl {version('trl')} · peft {peft.__version__} · "
+      f"deepspeed {version('deepspeed')}")
 assert torch.version.cuda and tuple(map(int, torch.version.cuda.split(".")[:2])) >= (12, 8), \
     "Blackwell needs a CUDA >= 12.8 torch build"
 EOF
