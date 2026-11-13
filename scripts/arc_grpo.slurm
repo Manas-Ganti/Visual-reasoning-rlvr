@@ -62,6 +62,14 @@ arc_notify "<b>START</b> grpo ${SLURM_JOB_ID:-?} · ${VRR_DATASET:-?} · ${SLURM
 
 MODEL="${MODEL:-32b}"
 SFT_CKPT="${SFT_CKPT:-checkpoints/${VRR_DATASET}/sft-qwen2.5-vl-32b}"
+# SFT_CKPT=none trains a fresh LoRA on the base model. That is what the 1-GPU
+# smoke test uses, since the 32B SFT adapter cannot load onto the 7B:
+#   MODEL=7b SFT_CKPT=none NUM_GEN=4 GROUPS_PER_STEP=1 sbatch --gres=gpu:1 \
+#     --mem=120G --time=01:00:00 --qos=tc_a100_normal_short scripts/arc_grpo.slurm \
+#     --max-steps 2 --logp-parity
+# It must print "[forward-probe] {... all True} images=N" and a
+# "[logp-parity]" line, or the full run is not worth submitting.
+[ "$SFT_CKPT" = none ] && SFT_CKPT=""
 DS="${DS:-configs/deepspeed_zero2.json}"
 NUM_GEN="${NUM_GEN:-8}"                            # GRPO group size G
 DEGRADATION="${DEGRADATION:-clean}"
@@ -77,10 +85,18 @@ GRAD_ACCUM="${GRAD_ACCUM:-}"                       # default: one GRPO group/ste
 # the same inspect budget. A turn cut off before its ACTION line is unparseable,
 # so the episode burns a turn and can end with no verdict at -1.00.
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-}"
+# Batched rollouts. GROUPS_PER_STEP distinct images per optimizer step; each
+# rank rolls out (8 x GROUPS_PER_STEP / ranks) episodes in ONE lockstep batch.
+# Run 3 was effectively GROUPS_PER_STEP=1: one image per step, one episode per
+# rank, nothing to batch. ROLLOUT_BATCH caps concurrent episodes per GPU for KV
+# memory: leave unset on H200 (8 fits), set 4 on A100-80. Calibrate first:
+#   GROUPS_PER_STEP=8 sbatch -p h200_normal_q scripts/arc_grpo.slurm --max-steps 5
+GROUPS_PER_STEP="${GROUPS_PER_STEP:-8}"
+ROLLOUT_BATCH="${ROLLOUT_BATCH:-}"
 
 arc_torchrun training/grpo.py \
   --model "$MODEL" \
-  --sft-checkpoint "$SFT_CKPT" \
+  ${SFT_CKPT:+--sft-checkpoint "$SFT_CKPT"} \
   --deepspeed "$DS" \
   --num-generations "$NUM_GEN" \
   --degradation "$DEGRADATION" \
@@ -90,4 +106,6 @@ arc_torchrun training/grpo.py \
   ${RESUME:+--resume ${RESUME}} \
   ${GRAD_ACCUM:+--grad-accum "$GRAD_ACCUM"} \
   ${MAX_NEW_TOKENS:+--max-new-tokens "$MAX_NEW_TOKENS"} \
+  --groups-per-step "$GROUPS_PER_STEP" \
+  ${ROLLOUT_BATCH:+--rollout-batch-size "$ROLLOUT_BATCH"} \
   "$@"

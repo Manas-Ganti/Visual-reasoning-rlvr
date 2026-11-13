@@ -48,6 +48,7 @@ class EpisodeMetrics:
 
     def __init__(self):
         self.n = self.correct = self.answered = self.steps = self.inspects = 0
+        self.turns = self.retok_mismatch = 0
         self.reward_sum = 0.0
 
     def add(self, ep: dict):
@@ -62,6 +63,7 @@ class EpisodeMetrics:
         return {
             "n": self.n, "reward_sum": self.reward_sum, "correct": self.correct,
             "answered": self.answered, "steps": self.steps, "inspects": self.inspects,
+            "turns": self.turns, "retok_mismatch": self.retok_mismatch,
         }
 
     @staticmethod
@@ -76,6 +78,9 @@ class EpisodeMetrics:
             "rollout/avg_steps": tot.get("steps", 0) / n,
             "rollout/avg_inspects": tot.get("inspects", 0) / n,
             "rollout/episodes": tot.get("n", 0),
+            # Turns whose sampled ids differ from the template's re-encoding of
+            # the same text (see common.assemble_episode). Near 0 is expected.
+            "rollout/retok_mismatch_rate": tot.get("retok_mismatch", 0) / max(tot.get("turns", 0), 1),
         }
 
 
@@ -98,28 +103,49 @@ def _generation_ctx(trainer):
         return contextlib.nullcontext(model)
 
 
-def make_rollout_func(env, processor, max_turns, degradation, trace_logger, args):
+def make_rollout_func(envs, processor, max_turns, degradation, trace_logger, args):
+    """Roll out this rank's whole generation batch in lockstep.
+
+    TRL hands ``rollout_func`` the rank's prompts for ``steps_per_generation``
+    micro-steps at once (``per_device x steps_per_generation`` episodes). Run 3
+    walked them one ``generate`` at a time. Here up to ``len(envs)`` episodes
+    share every ``generate`` call, and a slot is refilled as soon as its episode
+    ends. With one episode per rank (the old default shape) this degenerates to
+    the sequential loop, so the batching only pays once ``--groups-per-step``
+    gives each rank several episodes.
+    """
     def rollout_func(prompts, trainer):
         step = int(getattr(trainer.state, "global_step", 0))
         metrics = EpisodeMetrics()
-        batch = {"prompt_ids": [], "completion_ids": [], "logprobs": [], "episode_reward": []}
+        jobs = [(common.seed_index(p), common.seed_degradation(p, degradation)) for p in prompts]
+
+        def on_episode(env, ep):
+            metrics.add(ep)
+            if trace_logger is not None:
+                trace_logger.log(env.get_trace(global_step=step, phase="train"))
 
         with _generation_ctx(trainer) as model:
             policy = common.HFPolicy(model, processor, max_new_tokens=args.max_new_tokens)
-            for prompt in prompts:
-                ep = common.run_episode(
-                    policy, env,
-                    index=common.seed_index(prompt),
-                    degradation=common.seed_degradation(prompt, degradation),
-                    max_turns=max_turns, sample=True,
-                    temperature=args.temperature, top_p=args.top_p,
-                    max_new_tokens=args.max_new_tokens,
-                )
-                for k in batch:
-                    batch[k].append(ep[k])
-                metrics.add(ep)
-                if trace_logger is not None:
-                    trace_logger.log(env.get_trace(global_step=step, phase="train"))
+            episodes = common.run_episodes_batched(
+                policy, envs, jobs, max_turns=max_turns, sample=True,
+                temperature=args.temperature, top_p=args.top_p,
+                max_new_tokens=args.max_new_tokens, on_episode=on_episode,
+                collect_tokens=True, collect_logprobs=args.rollout_logprobs,
+                full_episode=True, turn_end_id=policy.turn_end_id,
+            )
+        if len(episodes) != len(prompts):
+            raise RuntimeError(f"rollout returned {len(episodes)} episodes for {len(prompts)} prompts")
+
+        batch = {k: [ep[k] for ep in episodes]
+                 for k in ("prompt_ids", "completion_ids", "logprobs", "episode_reward",
+                           "env_mask", "images")}
+        # TRL treats logprobs=None as "not collected" (its own HF path does the
+        # same). An empty list per row would be read as zero-length logprobs.
+        if not args.rollout_logprobs:
+            batch["logprobs"] = None
+        turns = sum(ep["turns"] for ep in episodes)
+        metrics.retok_mismatch += sum(ep["retok_mismatch"] for ep in episodes)
+        metrics.turns += turns
 
         # Rank-local counters → one global summary, so the printed/logged rollout
         # metrics describe the whole data-parallel batch, not just this rank's slice.
@@ -137,6 +163,131 @@ def make_rollout_func(env, processor, max_turns, degradation, trace_logger, args
         return batch
 
     return rollout_func
+
+
+def probe_forward_inputs(trainer) -> None:
+    """Check, on the first training forward, that the policy gradient sees pixels.
+
+    TRL 1.9.2 builds the training forward pass's images from the DATASET when
+    ``rollout_func`` is used, and our seed dataset is text only. Runs 1-3 almost
+    certainly trained on image placeholder tokens with no pixels and without
+    the inspected cells (see ``VisionRolloutGRPOTrainer``). This wraps TRL's
+    logprob helper and, on its first call, raises if ``pixel_values``,
+    ``image_grid_thw`` or ``mm_token_type_ids`` are missing. Qwen2.5-VL needs all
+    three: without ``mm_token_type_ids`` and the grid it silently falls back to
+    1-D text positions. TRL also drops the images without a word when
+    placeholder counts and image features disagree, so a missing key here means
+    either the old bug or a count mismatch, and both must stop the run.
+    """
+    fn = getattr(trainer, "_get_per_token_logps_and_entropies", None)
+    if fn is None:
+        return
+    seen = {"done": False}
+
+    def wrapped(model, input_ids, *a, **kw):
+        if not seen["done"]:
+            seen["done"] = True
+            have = {k: kw.get(k) is not None
+                    for k in ("pixel_values", "image_grid_thw", "mm_token_type_ids")}
+            n_img = (int(kw["image_grid_thw"].shape[0]) if have["image_grid_thw"] else 0)
+            common.rank0_print(f"[forward-probe] {have} images={n_img} "
+                               f"seq={tuple(input_ids.shape)}", flush=True)
+            if not all(have.values()):
+                raise RuntimeError(
+                    f"[forward-probe] training forward is missing {[k for k, v in have.items() if not v]}: "
+                    "the policy gradient would not see the images. Not training on that.")
+        return fn(model, input_ids, *a, **kw)
+
+    trainer._get_per_token_logps_and_entropies = wrapped
+
+
+def make_trainer_class():
+    """GRPOTrainer whose training forward sees every image of the episode.
+
+    Why a subclass: on the ``rollout_func`` path TRL 1.9.2 takes images from the
+    dataset. It does have a branch built for images INSIDE the completion,
+    written for tool calls that return images: it runs the image processor on
+    the flat image list, derives ``mm_token_type_ids`` from the actual token ids
+    (Qwen2.5-VL needs these for its 3-D positions), and checks placeholder
+    counts against image features. That is exactly our case. The branch is
+    gated on ``self.tools``, and setting ``self.tools`` for the whole run would
+    also switch on TRL's tool-call loop inside ``_generate``. So:
+
+    * ``_generate`` runs TRL's own rollout_func path unchanged, then moves the
+      episode images out of the extra fields into ``images``/``tool_images``;
+    * only after that does it mark ``self.tools`` truthy, for the remainder of
+      that one ``_generate_and_score_completions`` call (the forward-kwarg
+      branch and nothing else), and the wrapper restores it in ``finally``.
+
+    The probe above turns any silent failure of this into a crash on step 1.
+    """
+    from trl import GRPOTrainer
+
+    def _rollout_images_marker():
+        """Placeholder: makes TRL take its in-completion image branch."""
+
+    class VisionRolloutGRPOTrainer(GRPOTrainer):
+        logp_parity = False
+
+        def _generate(self, prompts):
+            out = list(super()._generate(prompts))
+            extra = out[5]
+            images = extra.pop("images", None)
+            if images is not None:
+                out[6] = images        # images: count per sample -> num_images
+                out[7] = images        # tool_images: selects the in-completion branch
+                self._saved_tools = self.tools
+                self.tools = [_rollout_images_marker]
+            return tuple(out)
+
+        def _generate_and_score_completions(self, inputs):
+            try:
+                output = super()._generate_and_score_completions(inputs)
+            finally:
+                if hasattr(self, "_saved_tools"):
+                    self.tools = self._saved_tools
+                    del self._saved_tools
+            if self.logp_parity:
+                self._log_logp_parity(output)
+            return output
+
+        def _log_logp_parity(self, output):
+            """Compare rollout logprobs with the training forward's, same tokens.
+
+            If the training sequence reproduces what the policy saw while
+            generating, the two agree to bf16 noise. Missing images, missing
+            reveals, or a wrong temperature all show up as a gap. Diagnostic
+            only (one extra forward per generation batch), behind
+            --logp-parity.
+            """
+            import torch
+
+            sampled = output.get("sampling_per_token_logps")
+            if sampled is None:
+                return
+            ids = torch.cat([output["prompt_ids"], output["completion_ids"]], dim=1)
+            attn = torch.cat([output["prompt_mask"], output["completion_mask"]], dim=1)
+            mask = output["completion_mask"] * output.get("tool_mask", 1)
+            fwd = {k: output[k] for k in ("pixel_values", "image_grid_thw", "num_images",
+                                          "mm_token_type_ids") if k in output}
+            was_training = self.model.training
+            self.model.eval()
+            try:
+                with torch.no_grad():
+                    logps, _, _ = self._get_per_token_logps_and_entropies(
+                        self.model, ids, attn, output["completion_ids"].size(1),
+                        self.args.per_device_train_batch_size, **fwd)
+            finally:
+                self.model.train(was_training)
+            diff = (logps - sampled).abs()[mask.bool()]
+            mean = self.accelerator.gather(diff.mean() if diff.numel() else diff.new_zeros(())).mean()
+            mx = self.accelerator.gather(diff.max() if diff.numel() else diff.new_zeros(())).max()
+            self._metrics["train"]["rollout/logp_parity_mean"].append(mean.item())
+            self._metrics["train"]["rollout/logp_parity_max"].append(mx.item())
+            common.rank0_print(f"[logp-parity] mean|dlogp|={mean.item():.4f} "
+                               f"max={mx.item():.3f} over {int(mask.sum())} tokens", flush=True)
+
+    return VisionRolloutGRPOTrainer
 
 
 def episode_reward_func(completions, episode_reward=None, **kwargs):
@@ -204,6 +355,25 @@ def main():
     ap.add_argument("--grad-accum", type=int, default=None,
                     help="Default: num_generations / (per_device × world_size), i.e. one "
                          "GRPO group per optimizer step.")
+    ap.add_argument("--groups-per-step", type=int, default=1,
+                    help="GRPO groups (distinct images) per optimizer step. Sets the default "
+                         "--grad-accum. At 1 on 8 ranks every rank rolls out ONE episode and "
+                         "there is nothing to batch: run 3 saw one image per step. At 8, each "
+                         "rank rolls out 8 episodes in one lockstep batch.")
+    ap.add_argument("--rollout-batch-size", type=int, default=None,
+                    help="Max episodes per lockstep generate on one rank. Default: all of the "
+                         "rank's episodes. Lower it if the KV cache does not fit: each 32B "
+                         "episode needs ~2 GB of KV at its last turn, on top of ~66 GB of "
+                         "replicated bf16 weights under ZeRO-2. 8 fits an H200, ~4 an A100-80.")
+    ap.add_argument("--rollout-logprobs", action="store_true",
+                    help="Return sampling logprobs to TRL. Unused on this HF path (TRL reads them "
+                         "only for vLLM importance sampling / the off-policy mask), and costs a "
+                         "batch x steps x vocab score tensor.")
+    ap.add_argument("--logp-parity", action="store_true",
+                    help="Diagnostic: compare rollout logprobs with the training forward's on "
+                         "the same tokens and log the gap. Implies --rollout-logprobs. Near 0 "
+                         "means the gradient sees what the policy saw. Use for calibration "
+                         "runs; it adds a forward pass per step.")
     ap.add_argument("--deepspeed", default=None,
                     help="DeepSpeed JSON. ZeRO-2 recommended (ZeRO-3 gathers params per turn).")
     ap.add_argument("--gradient-checkpointing", action="store_true", default=True)
@@ -217,23 +387,32 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
+    if args.logp_parity:
+        args.rollout_logprobs = True
     dist = common.dist_info()
     model_name = common.resolve_model(args.model)
     args.manifest = args.manifest or common.manifest_path(args.dataset)
     output_dir = args.output_dir or default_output_dir(model_name, args.dataset)
     if args.grad_accum is None:
         per_step = max(args.per_device_batch_size * dist.world_size, 1)
-        args.grad_accum = max(args.num_generations // per_step, 1)
+        args.grad_accum = max(args.num_generations * args.groups_per_step // per_step, 1)
     check_batch_shape(args, dist.world_size)
     common.record_run("grpo", f"model={model_name} sft={args.sft_checkpoint} "
                       f"out={output_dir} G={args.num_generations}", args.dataset)
 
-    env = InvestigationEnv(
-        manifest_path=args.manifest, max_inspects=args.max_inspects,
-        reward_config=RewardConfig(), shuffle=False, default_degradation=args.degradation,
-        seed=args.seed + dist.rank, dataset=args.dataset,
-        overview_long_edge=args.overview_long_edge,
-    )
+    def env_factory():
+        return InvestigationEnv(
+            manifest_path=args.manifest, max_inspects=args.max_inspects,
+            reward_config=RewardConfig(), shuffle=False, default_degradation=args.degradation,
+            seed=args.seed + dist.rank, dataset=args.dataset,
+            overview_long_edge=args.overview_long_edge,
+        )
+
+    env = env_factory()
+    # Episodes this rank rolls out per generation: TRL sets steps_per_generation
+    # to grad_accum by default, and per_device episodes come per micro-step.
+    local_episodes = args.per_device_batch_size * args.grad_accum
+    rollout_batch = min(args.rollout_batch_size or local_episodes, local_episodes)
     max_turns = args.max_inspects + 3
     train_idx = [i for i, r in enumerate(env.records) if r.get("split", "train") == "train"]
     common.rank0_print(f"Loaded {len(env.records)} records; {len(train_idx)} in train split.")
@@ -245,11 +424,13 @@ def main():
             obs, r, term, trunc, info = env.step(action)
             print(f"  {info['action_type']:<7} reward={r:+.3f}")
         print(f"Model: {model_name} | world_size={dist.world_size} (nodes={dist.num_nodes}) "
-              f"| G={args.num_generations} | grad_accum={args.grad_accum}")
+              f"| G={args.num_generations} | grad_accum={args.grad_accum} "
+              f"| episodes/rank/step={local_episodes} | rollout batch={rollout_batch} "
+              f"| images/step={args.per_device_batch_size * dist.world_size * args.grad_accum // args.num_generations}")
         print("Dry run OK. Install trl/peft/accelerate/deepspeed/wandb + CUDA GPUs to train.")
         return
 
-    from trl import GRPOConfig, GRPOTrainer
+    from trl import GRPOConfig
 
     from env.trace_logger import TraceLogger
 
@@ -277,7 +458,19 @@ def main():
         output_dir=output_dir,
         per_device_train_batch_size=args.per_device_batch_size,
         gradient_accumulation_steps=args.grad_accum,
+        # Explicit, though TRL defaults it to grad_accum: one rollout_func call per
+        # optimizer step, so the samples are always on-policy and TRL skips the
+        # old-logprob forward pass.
+        steps_per_generation=args.grad_accum,
         num_generations=args.num_generations,
+        # TRL scores logprobs as logits / temperature. Runs 1-3 left this at
+        # TRL's default 1.0 while rollouts sampled at 0.7, so the gradient was
+        # taken from a different distribution than the one sampled from.
+        temperature=args.temperature,
+        top_p=args.top_p,
+        # Would gather every episode image to every rank, every step, for a
+        # W&B table. The trace logger already keeps the trajectories.
+        log_multimodal=False,
         learning_rate=args.learning_rate,
         beta=args.beta,
         num_train_epochs=args.epochs,
@@ -317,15 +510,21 @@ def main():
         if dist.is_main else None
     )
 
-    trainer = GRPOTrainer(
+    trainer_cls = make_trainer_class()
+    trainer_cls.logp_parity = args.logp_parity
+    trainer = trainer_cls(
         model=model,
         processing_class=processor,
         reward_funcs=episode_reward_func,
         args=training_args,
         train_dataset=dataset,
         peft_config=None if adapter else common.lora_config(r=args.lora_r, target=args.lora_target),
-        rollout_func=make_rollout_func(env, processor, max_turns, args.degradation, trace_logger, args),
+        rollout_func=make_rollout_func(
+            common.make_env_pool(env_factory, rollout_batch), processor, max_turns,
+            args.degradation, trace_logger, args),
     )
+    common.rank0_print(f"Rollouts: {local_episodes} episodes/rank/step, lockstep batch {rollout_batch}")
+    probe_forward_inputs(trainer)
     # ETA + walltime-margin to W&B, so a 10–34h run is followable from the
     # dashboard alone. logging_steps=1 above means one ETA point per step.
     trainer.add_callback(common.progress_callback())

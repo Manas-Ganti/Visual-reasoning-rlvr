@@ -874,6 +874,93 @@ def _action_line_stopper(processor, prompt_len: int):
     return StoppingCriteriaList([_Stop()])
 
 
+# Only the newest tokens can complete an ACTION line that was incomplete one
+# step ago, and the stopper runs every step, so decoding a short tail finds the
+# same first match as decoding the whole turn. 64 tokens covers
+# "ACTION: VERDICT REAL ... confidence=0.85\n" several times over. A full-turn
+# decode per row per step is 8 x 900 decodes of up to 900 tokens per turn, and
+# that cost lands on the CPU while the GPU waits.
+_STOP_WINDOW = 64
+
+
+def row_finished(gen_ids: list[int], decode, eos_ids) -> bool:
+    """True once a generated turn is over: EOS emitted, or ACTION line complete.
+
+    Pure (no torch), so the stop rule is unit-testable on CPU. ``decode`` maps a
+    token-id list to text; ``eos_ids`` is a set of terminator ids.
+    """
+    if not gen_ids:
+        return False
+    if gen_ids[-1] in eos_ids:
+        return True
+    if len(gen_ids) < 8:        # nothing plausible yet; skip the decode
+        return False
+    return bool(_ACTION_DONE.search(decode(gen_ids[-_STOP_WINDOW:])))
+
+
+def _eos_ids(model, processor) -> set[int]:
+    ids = getattr(getattr(model, "generation_config", None), "eos_token_id", None)
+    if ids is None:
+        ids = getattr(getattr(processor, "tokenizer", processor), "eos_token_id", None)
+    if ids is None:
+        return set()
+    return {int(i) for i in (ids if isinstance(ids, (list, tuple)) else [ids])}
+
+
+def _batch_action_stopper(processor, prompt_len: int, batch_size: int, eos_ids: set[int]):
+    """Per-row StoppingCriteria for a left-padded batch.
+
+    Returns ``(criteria, ends)``. ``ends[i]`` is set to row i's generated length
+    the step it finishes. After that, ``generate`` keeps writing pad tokens into
+    the row until the whole batch is done. Those pads were never sampled, so the
+    caller slices each row to ``ends[i]``: the token ids GRPO trains on must be
+    exactly the ones the policy produced. A row that never finishes hit
+    max_new_tokens and keeps its full length (``ends[i]`` stays None).
+    """
+    try:
+        import torch
+        from transformers import StoppingCriteria, StoppingCriteriaList
+    except ImportError:
+        return None, [None] * batch_size
+
+    ends: list[int | None] = [None] * batch_size
+
+    def _decode(ids):
+        return processor.decode(ids, skip_special_tokens=True)
+
+    class _Stop(StoppingCriteria):
+        def __call__(self, input_ids, scores, **kwargs):
+            gen = input_ids[:, prompt_len:]
+            for i in range(batch_size):
+                if ends[i] is None and row_finished(gen[i].tolist(), _decode, eos_ids):
+                    ends[i] = gen.shape[1]
+            return torch.tensor([e is not None for e in ends], dtype=torch.bool,
+                                device=input_ids.device)
+
+    return StoppingCriteriaList([_Stop()]), ends
+
+
+def build_inputs_batch(processor, obs_list, device):
+    """Left-padded batch of observations for one lockstep ``generate``.
+
+    The Qwen processor consumes ``images`` as one flat list in the order the
+    image placeholders appear across the batch, so per-observation lists are
+    concatenated in batch order. Left padding keeps every row's last prompt
+    token in the final column, which is where decoding starts.
+    """
+    texts = [processor.apply_chat_template(o["messages"], tokenize=False,
+                                           add_generation_prompt=True) for o in obs_list]
+    images = [img for o in obs_list for img in (o.get("images") or [])]
+    tok = getattr(processor, "tokenizer", processor)
+    old_side = getattr(tok, "padding_side", "right")
+    tok.padding_side = "left"
+    try:
+        enc = processor(text=texts, images=images or None, return_tensors="pt", padding=True)
+    finally:
+        tok.padding_side = old_side
+    return enc.to(device)
+
+
 class HFPolicy:
     """HF ``generate`` policy: one action per call, optional per-token logprobs.
 
@@ -886,6 +973,9 @@ class HFPolicy:
     def __init__(self, model, processor, max_new_tokens: int = 640, repetition_penalty: float = 1.1):
         self.model = model
         self.processor = processor
+        tok = getattr(processor, "tokenizer", processor)
+        # Qwen's chat template closes every turn with <|im_end|>.
+        self.turn_end_id = tok.convert_tokens_to_ids("<|im_end|>")
         self.max_new_tokens = max_new_tokens
         self.repetition_penalty = repetition_penalty
 
@@ -954,6 +1044,77 @@ class HFPolicy:
             "logprobs": logprobs,
         }
 
+    def act_batch(
+        self,
+        obs_list: list[dict],
+        *,
+        sample: bool = True,
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+        max_new_tokens: int | None = None,
+        collect_tokens: bool = False,
+        collect_logprobs: bool = False,
+    ) -> list[dict]:
+        """One ``generate`` over many live episodes: the GRPO rollout speedup.
+
+        Decoding a 32B is bound by memory bandwidth: every token reads the full
+        weights once, whether it serves 1 row or 8. Run 3 generated its episodes
+        one at a time (~401 s/step). Here the episodes advance in lockstep and
+        share each weight read.
+
+        ``collect_logprobs`` is off by default and is a diagnostic: it powers
+        the logprob-parity check. Logprobs are taken from the RAW logits divided
+        by the sampling temperature, which is exactly what TRL's training
+        forward computes (``logits / args.temperature``, no top-p, no
+        repetition penalty). So if the training sequence reproduces the
+        generation context, the two agree to bf16 noise, and any larger gap
+        means the training step is looking at something else. It costs a
+        (batch x steps x 152k-vocab) logits buffer, so keep it to short runs.
+        """
+        import torch
+
+        if not obs_list:
+            return []
+        inputs = build_inputs_batch(self.processor, obs_list, self.device)
+        prompt_len = inputs["input_ids"].shape[1]
+        gen_kwargs = {
+            "max_new_tokens": max_new_tokens or self.max_new_tokens,
+            "do_sample": sample,
+            "repetition_penalty": self.repetition_penalty,
+        }
+        if sample:
+            gen_kwargs.update(temperature=temperature, top_p=top_p)
+        stopper, ends = _batch_action_stopper(
+            self.processor, prompt_len, len(obs_list), _eos_ids(self.model, self.processor))
+        if stopper is not None:
+            gen_kwargs["stopping_criteria"] = stopper
+
+        with torch.no_grad():
+            out = self.model.generate(
+                **inputs, return_dict_in_generate=True, output_logits=collect_logprobs, **gen_kwargs
+            )
+        gen = out.sequences[:, prompt_len:]
+        trans = None
+        if collect_logprobs:
+            temp = temperature if sample else 1.0
+            steps = torch.stack(out.logits, dim=1).float() / temp          # (B, T, V)
+            trans = torch.log_softmax(steps, dim=-1).gather(
+                -1, gen[:, :steps.shape[1]].unsqueeze(-1)).squeeze(-1)    # (B, T)
+            del steps
+
+        results = []
+        for i in range(len(obs_list)):
+            n = ends[i] if ends[i] is not None else gen.shape[1]
+            row = gen[i, :n]
+            mask = inputs["attention_mask"][i].bool()
+            results.append({
+                "text": self.processor.decode(row, skip_special_tokens=True),
+                "prompt_ids": inputs["input_ids"][i][mask].tolist() if collect_tokens else [],
+                "token_ids": row.tolist() if collect_tokens else [],
+                "logprobs": trans[i, :n].tolist() if trans is not None else [],
+            })
+        return results
+
 
 # --------------------------------------------------------------------------- #
 # Multi-turn rollout
@@ -1014,6 +1175,86 @@ def run_episode(
     return episode_result(info, episode_return, prompt_ids, completion_ids, logprobs)
 
 
+class EpisodeAssemblyError(RuntimeError):
+    """The per-turn prompts do not extend each other, so no single training
+    sequence reproduces what the policy saw. Fails loudly rather than training
+    on a context the policy never had."""
+
+
+def assemble_episode(turns: list[dict], turn_end_id: int) -> dict:
+    """Rebuild ONE training sequence that matches what the policy saw every turn.
+
+    ``turns[k]`` is ``{"prompt_ids", "token_ids", "logprobs"}``: the full,
+    unpadded prompt the policy was given at turn k, and the tokens it sampled.
+    The chat template is prefix-stable, so ``prompt[k+1]`` is ``prompt[k]``
+    followed by turn k's assistant text (re-encoded), ``turn_end_id``, and the
+    environment's next message, which holds the revealed cell's image
+    placeholders. The result:
+
+        prompt_ids     = prompt[0]
+        completion_ids = sampled[0] + env[0] + sampled[1] + env[1] + ... + sampled[K]
+        env_mask       = 1 on sampled tokens, 0 on env tokens
+
+    The sampled ids are kept as sampled, because those are the tokens the
+    gradient has to score. Env segments are copied from the next prompt, so
+    every image placeholder sits where it sat during generation. TRL drops
+    ``env_mask == 0`` tokens from the loss: the policy is conditioned on the
+    reveals but never trained to write them.
+
+    ``retok_mismatch`` counts turns whose sampled ids differ from the template's
+    re-encoding of the same text. For those turns, later turns were generated
+    against the re-encoded ids, so their training context differs by that
+    turn's tokenization only. It is logged, not hidden.
+
+    Run 3 returned only ``prompt[0]`` + sampled turns glued together. Every
+    environment message, and every inspected cell, was missing from the
+    sequence the gradient was computed on.
+    """
+    if not turns:
+        return {"prompt_ids": [], "completion_ids": [], "env_mask": [], "logprobs": [],
+                "retok_mismatch": 0}
+    completion: list[int] = []
+    env_mask: list[int] = []
+    logprobs: list[float] = []
+    have_logprobs = all(len(t.get("logprobs") or []) == len(t["token_ids"]) for t in turns)
+    mismatch = 0
+
+    for k, turn in enumerate(turns):
+        if k:
+            prev_prompt, prev_gen = turns[k - 1]["prompt_ids"], turns[k - 1]["token_ids"]
+            prompt = turn["prompt_ids"]
+            if prompt[:len(prev_prompt)] != prev_prompt:
+                raise EpisodeAssemblyError(
+                    f"turn {k}: prompt does not extend turn {k - 1}'s prompt; the chat template "
+                    "is not prefix-stable, or the env edited an earlier message")
+            tail = prompt[len(prev_prompt):]
+            try:
+                j = tail.index(turn_end_id)
+            except ValueError as e:
+                raise EpisodeAssemblyError(
+                    f"turn {k}: no turn-end token after turn {k - 1}'s assistant text") from e
+            ended_itself = bool(prev_gen) and prev_gen[-1] == turn_end_id
+            body = prev_gen[:-1] if ended_itself else prev_gen
+            if tail[:j] != body:
+                mismatch += 1
+            # A turn stopped by the ACTION-line stopper never emitted the turn-end
+            # token, so the template's copy closes it (env-masked). A turn that
+            # emitted it already has it among its sampled tokens.
+            env = tail[j + 1:] if ended_itself else tail[j:]
+            completion.extend(env)
+            env_mask.extend([0] * len(env))
+            if have_logprobs:
+                logprobs.extend([0.0] * len(env))
+        completion.extend(turn["token_ids"])
+        env_mask.extend([1] * len(turn["token_ids"]))
+        if have_logprobs:
+            logprobs.extend(turn["logprobs"])
+
+    return {"prompt_ids": list(turns[0]["prompt_ids"]), "completion_ids": completion,
+            "env_mask": env_mask, "logprobs": logprobs if have_logprobs else [],
+            "retok_mismatch": mismatch}
+
+
 def episode_result(info, episode_return, prompt_ids=None, completion_ids=None, logprobs=None) -> dict:
     return {
         "prompt_ids": prompt_ids or [],
@@ -1042,6 +1283,10 @@ def run_episodes_batched(
     max_new_tokens: int = 640,
     on_reset=None,
     on_episode=None,
+    collect_tokens: bool = False,
+    collect_logprobs: bool = False,
+    full_episode: bool = False,
+    turn_end_id: int | None = None,
 ) -> list[dict]:
     """Run many episodes in lockstep against a batching policy (``act_batch``).
 
@@ -1053,7 +1298,24 @@ def run_episodes_batched(
 
     ``on_episode(env, result)`` fires as each episode terminates, while that env's
     state is still intact (used for trace logging / inspected-cell readout).
+
+    ``collect_tokens`` adds the GRPO bookkeeping that ``run_episode`` returns:
+    the first turn's prompt ids, then every generated token across turns,
+    concatenated. Results come back in ``jobs`` order, which GRPO depends on
+    because consecutive results form one group.
+
+    ``full_episode`` (needs ``collect_tokens`` and ``turn_end_id``) instead
+    returns the whole interleaved episode via ``assemble_episode``: env
+    messages included, an ``env_mask``, and the episode's ``images`` in
+    placeholder order. That is what the GRPO forward pass must see.
     """
+    if full_episode and (not collect_tokens or turn_end_id is None):
+        raise ValueError("full_episode needs collect_tokens=True and a turn_end_id")
+    act_kwargs = {}
+    if collect_tokens:
+        act_kwargs["collect_tokens"] = True
+    if collect_logprobs:
+        act_kwargs["collect_logprobs"] = True
     results: list[dict] = [None] * len(jobs)  # type: ignore[list-item]
     queue = list(range(len(jobs)))
     slots: dict[int, dict] = {}  # env slot -> live episode bookkeeping
@@ -1069,7 +1331,9 @@ def run_episodes_batched(
             if on_reset is not None:
                 on_reset(envs[slot])
                 obs = envs[slot]._observation()
-            slots[slot] = {"job": job_i, "obs": obs, "turns": 0, "return": 0.0}
+            slots[slot] = {"job": job_i, "obs": obs, "turns": 0, "return": 0.0,
+                           "prompt_ids": None, "completion_ids": [], "logprobs": [],
+                           "turn_log": [], "images": []}
         if not slots:
             break
 
@@ -1080,14 +1344,34 @@ def run_episodes_batched(
             temperature=temperature,
             top_p=top_p,
             max_new_tokens=max_new_tokens,
+            **act_kwargs,
         )
         for slot, out in zip(live, outs):
             st = slots[slot]
+            if full_episode:
+                st["turn_log"].append({"prompt_ids": out["prompt_ids"],
+                                       "token_ids": out["token_ids"],
+                                       "logprobs": out.get("logprobs") or []})
+                # The images of the last prompt the policy saw are exactly the
+                # ones whose placeholders the assembled sequence contains.
+                st["images"] = list(st["obs"].get("images") or [])
+            if collect_tokens:
+                if st["prompt_ids"] is None:
+                    st["prompt_ids"] = out["prompt_ids"]
+                st["completion_ids"].extend(out["token_ids"])
+                st["logprobs"].extend(out.get("logprobs") or [])
             obs, reward, terminated, truncated, info = envs[slot].step(out["text"])
             st["obs"], st["turns"] = obs, st["turns"] + 1
             st["return"] += reward
             if terminated or truncated or st["turns"] >= max_turns:
-                res = episode_result(info, st["return"])
+                res = episode_result(info, st["return"], st["prompt_ids"],
+                                     st["completion_ids"], st["logprobs"])
+                if full_episode:
+                    full = assemble_episode(st["turn_log"], turn_end_id)
+                    res.update(prompt_ids=full["prompt_ids"], completion_ids=full["completion_ids"],
+                               logprobs=full["logprobs"], env_mask=full["env_mask"],
+                               retok_mismatch=full["retok_mismatch"], turns=len(st["turn_log"]),
+                               images=st["images"])
                 results[st["job"]] = res
                 if on_episode is not None:
                     on_episode(envs[slot], res)
