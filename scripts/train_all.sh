@@ -19,7 +19,6 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 export VRR_DATASET="${VRR_DATASET:-genimage}"
 export OVERVIEW_LONG_EDGE="${OVERVIEW_LONG_EDGE:?set OVERVIEW_LONG_EDGE — it must match the value the floor gate passed at}"
 export HF_HOME="${HF_HOME:-$HOME/hf_cache}"
-export CONDA_ENV="${CONDA_ENV:-vrr}"
 export MODEL="${MODEL:-32b}"
 
 # ---- site ------------------------------------------------------------------ #

@@ -176,18 +176,35 @@ arc_notify_finish() {
 #
 # `module reset` swaps in the CLUSTER's conda, which cannot see a personal
 # ~/miniconda3 root — so a bare env NAME that activates fine on the login node
-# resolves to nothing inside the job. Give CONDA_ENV an ABSOLUTE PATH:
+# resolves to nothing inside the job. Give VRR_ENV an ABSOLUTE PATH:
 #
-#     CONDA_ENV=/home/$USER/miniconda3/envs/vrr sbatch scripts/arc_infer.slurm
+#     VRR_ENV=/home/$USER/miniconda3/envs/vrr sbatch scripts/arc_infer.slurm
 #
 module reset >/dev/null 2>&1 || true
 module load Miniforge3 >/dev/null 2>&1 || module load Anaconda3 >/dev/null 2>&1 || true
 
 # Each launcher names the env its stage needs in ARC_STAGE_ENV before sourcing
 # this file (vrr-train for sft/grpo, vrr for inference, vrr-gen for image
-# generation), so the right one is picked without CONDA_ENV on the submit line.
-# CONDA_ENV still overrides it; arc_require below catches a wrong choice.
-export CONDA_ENV="${CONDA_ENV:-${ARC_STAGE_ENV:-$HOME/miniconda3/envs/vrr}}"
+# generation), so the right one is picked with nothing on the submit line.
+#
+# The override is VRR_ENV, NOT the generic CONDA_ENV. sbatch forwards the login
+# shell's environment, so a CONDA_ENV exported by ~/.bashrc, site.env or an
+# earlier command silently won: a B200 job ran in the vLLM env `vrr` on
+# 2026-11-13. An inherited CONDA_ENV is now ignored, with a warning.
+#
+# On Blackwell (B200, Owl) the training stages switch to vrr-train-b200 by
+# themselves: vrr-train's torch 2.6+cu126 has no sm_100 kernels.
+_trainenv="$HOME/.conda/envs/vrr-train"
+if [ -z "${VRR_ENV:-}" ] && [ "${ARC_STAGE_ENV:-}" = "$_trainenv" ] \
+   && nvidia-smi -L 2>/dev/null | grep -q B200; then
+  ARC_STAGE_ENV="$_trainenv-b200"
+fi
+_want="${VRR_ENV:-${ARC_STAGE_ENV:-$HOME/miniconda3/envs/vrr}}"
+if [ -n "${CONDA_ENV:-}" ] && [ "$CONDA_ENV" != "$_want" ]; then
+  echo "[arc_env] ignoring inherited CONDA_ENV=$CONDA_ENV (set VRR_ENV to override); using $_want" >&2
+fi
+export CONDA_ENV="$_want"
+unset _trainenv _want
 if [ -x "$CONDA_ENV/bin/python" ]; then
   # PY is the interpreter every launcher must use. Resolving `python` through
   # PATH proved unreliable on ARC — a bare `python` here ran, printed nothing and
@@ -203,7 +220,7 @@ else
   eval "$(conda shell.bash hook 2>/dev/null)" || true
   conda activate "$CONDA_ENV" && export PY="$(command -v python)" || {
     echo "[arc_env] FATAL: cannot activate conda env '$CONDA_ENV'." >&2
-    echo "[arc_env]        Pass an absolute path: CONDA_ENV=/path/to/envs/vrr sbatch ..." >&2
+    echo "[arc_env]        Pass an absolute path: VRR_ENV=/path/to/envs/vrr sbatch ..." >&2
     return 1 2>/dev/null || exit 1
   }
 fi
@@ -261,8 +278,8 @@ if missing:
         % (", ".join(missing), env))
     sys.stderr.write(
         "[arc_env]        vrr = vLLM (gates/probes/distill/eval) · "
-        "vrr-train = trl+peft (sft/grpo) · vrr-gen = diffusers (synth)\n")
-    sys.stderr.write("[arc_env]        Re-submit with CONDA_ENV pointing at the right one.\n")
+        "vrr-train = trl+peft (sft/grpo; vrr-train-b200 on B200) · vrr-gen = diffusers (synth)\n")
+    sys.stderr.write("[arc_env]        Re-submit with VRR_ENV pointing at the right one.\n")
     sys.exit(1)
 print("[arc_env] requires " + " ".join(mods) + " — present", flush=True)
 ' || { return 1 2>/dev/null || exit 1; }

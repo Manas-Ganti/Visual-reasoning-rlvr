@@ -25,9 +25,9 @@
 # 10-minute NCCL failure). Leave it unset on A100, where arc_env.sh probes.
 #
 # --b200 targets the Owl cluster: QOS owl_b200_normal_{short,base}, partition
-# $ARC_B200_PARTITION (default b200_normal_q; confirm with `sinfo` on owl1), and,
-# for sft/grpo/check, the Blackwell env $HOME/.conda/envs/vrr-train-b200 (built by
-# scripts/setup_env_b200.sh) unless CONDA_ENV is set. Owl jobs must be submitted
+# $ARC_B200_PARTITION (default b200_normal_q; confirm with `sinfo` on owl1). The
+# Blackwell env vrr-train-b200 (scripts/setup_env_b200.sh) is chosen inside the
+# job by arc_env.sh when it sees a B200; VRR_ENV overrides. Owl jobs must be submitted
 # from an Owl login node (owl1.arc.vt.edu): sbatch talks to the local cluster.
 #
 # The job's environment (dataset, overview size, HF/W&B dirs, conda env) needs no
@@ -86,9 +86,8 @@ fi
 case "$gpu" in b200) qos_prefix="owl_b200" ;; *) qos_prefix="tc_${gpu}" ;; esac
 
 if [ "$gpu" = b200 ]; then
-  case "$stage" in
-    grpo|sft|check) export CONDA_ENV="${CONDA_ENV:-$HOME/.conda/envs/vrr-train-b200}" ;;
-  esac
+  # The env needs nothing here: arc_env.sh sees the B200 inside the job and
+  # switches sft/grpo/check to vrr-train-b200 (VRR_ENV overrides).
   if [ "${DRY_RUN:-0}" != 1 ] && [[ "$(hostname)" != owl* ]]; then
     echo "arc_submit: --b200 must be submitted from an Owl login node (ssh owl1.arc.vt.edu);" >&2
     echo "            sbatch here would send it to $(hostname -s | sed 's/[0-9]*$//')." >&2
@@ -134,7 +133,7 @@ fi
 
 if [ "${DRY_RUN:-0}" = 1 ]; then
   [ "$gpu" = h200 ] && echo "NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-}"
-  [ "$gpu" = b200 ] && echo "CONDA_ENV=${CONDA_ENV:-}"
+  [ "$gpu" = b200 ] && echo "VRR_ENV=${VRR_ENV:-<auto: vrr-train-b200 for sft/grpo/check>}"
   printf '%q ' "${cmd[@]}"; echo
 else
   exec "${cmd[@]}"

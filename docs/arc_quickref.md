@@ -43,7 +43,7 @@ HF_HOME=/home/manasganti/hf_cache          # NOT arc_env.sh's /projects default;
 WANDB_DIR=/home/manasganti/wandb           # /projects/$USER is not writable
 VRR_DATASET=synth1024                      # namespaces data/, checkpoints/, logs/, results/
 OVERVIEW_LONG_EDGE=56                      # MUST match across every stage of a run
-CONDA_ENV=<one of the three above>
+VRR_ENV=<one of the three above>      # only to override; an inherited CONDA_ENV is ignored
 ```
 
 `NCCL_SOCKET_IFNAME=eth0` on H200 (`tc-xe*`) only. **Leave it unset on A100** —
@@ -114,8 +114,8 @@ VRR_DATASET=synth1024                      # namespaces data/, checkpoints/, log
 OVERVIEW_LONG_EDGE=56                      # MUST match across every stage of a run
 HF_HOME=$HOME/hf_cache                     # token lives here too
 WANDB_DIR=$HOME/wandb                      # /projects/$USER is not writable
-CONDA_ENV                                  # per launcher: vrr-train (sft/grpo), vrr (infer),
-                                           # vrr / vrr-gen (synth caption / generate)
+VRR_ENV                                    # per launcher: vrr-train (sft/grpo; vrr-train-b200
+                                           # auto on B200), vrr (infer), vrr / vrr-gen (synth)
 MAX_INSPECTS=6                             # arc_grpo.slurm
 ARC_ACCOUNT=ece-6524-spring2026            # arc_submit.sh
 ```
@@ -172,7 +172,7 @@ Env vars before `sbatch`; sbatch flags; script; then any passthrough args to the
 Python entry point.
 
 ```bash
-HF_HOME=... WANDB_DIR=... CONDA_ENV=... OVERVIEW_LONG_EDGE=56 VRR_DATASET=synth1024 \
+HF_HOME=... WANDB_DIR=... VRR_ENV=... OVERVIEW_LONG_EDGE=56 VRR_DATASET=synth1024 \
 JOB=<stage> MODEL=32b TP=1 \
 sbatch --account=ece-6524-spring2026 --partition=h200_normal_q \
        --qos=tc_h200_normal_short --gres=gpu:h200:1 --cpus-per-task=8 --mem=96G \

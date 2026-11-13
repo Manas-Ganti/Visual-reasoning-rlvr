@@ -14,8 +14,8 @@
 #   STAGE=caption DATASET=synth1024 sbatch --gres=gpu:h200:1 --time=01:00:00 \
 #       --qos=tc_h200_normal_short scripts/arc_synth.slurm
 #
-#   # 3. generation: diffusers (CONDA_ENV=<gen env>)
-#   STAGE=generate DATASET=synth1024 CONDA_ENV=/path/to/envs/vrr-gen \
+#   # 3. generation: diffusers (env picked automatically; VRR_ENV overrides)
+#   STAGE=generate DATASET=synth1024 \
 #       sbatch --gres=gpu:h200:1 --time=02:00:00 scripts/arc_synth.slurm
 #
 #   # 4. assemble + verify: no GPU
