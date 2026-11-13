@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Submit an ARC job with the scheduling flags filled in.
 #
-#   scripts/arc_submit.sh <grpo|sft|infer|synth> [--h200|--a100] [sbatch flags...] [-- python args...]
+#   scripts/arc_submit.sh <grpo|sft|infer|synth|check> [--h200|--a100|--b200] [sbatch flags...] [-- python args...]
 #
 # Examples:
 #   # 7B smoke test of the GRPO forward-pass fix: 1 A100, 2 steps
@@ -23,6 +23,12 @@
 #   --mail-user  $ARC_MAIL_USER, if set
 # and on H200 exports NCCL_SOCKET_IFNAME=eth0 (ib0 there has no IPv4: a silent
 # 10-minute NCCL failure). Leave it unset on A100, where arc_env.sh probes.
+#
+# --b200 targets the Owl cluster: QOS owl_b200_normal_{short,base}, partition
+# $ARC_B200_PARTITION (default b200_normal_q; confirm with `sinfo` on owl1), and,
+# for sft/grpo/check, the Blackwell env $HOME/.conda/envs/vrr-train-b200 (built by
+# scripts/setup_env_b200.sh) unless CONDA_ENV is set. Owl jobs must be submitted
+# from an Owl login node (owl1.arc.vt.edu): sbatch talks to the local cluster.
 #
 # The job's environment (dataset, overview size, HF/W&B dirs, conda env) needs no
 # variables either: arc_env.sh holds the project defaults and each launcher picks
@@ -54,6 +60,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --) shift; pyargs=("$@"); break ;;
     --h200) gpu=h200 ;;
+    --b200) gpu=b200 ;;
     --a100) gpu=a100 ;;
     --partition=*) partition="${1#*=}" ;;
     -p|--partition) partition="$2"; shift ;;
@@ -69,9 +76,24 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -n "$partition" ]; then
-  case "$partition" in h200*) gpu=h200 ;; a100*) gpu=a100 ;; esac
+  case "$partition" in h200*) gpu=h200 ;; a100*) gpu=a100 ;; b200*) gpu=b200 ;; esac
+elif [ "$gpu" = b200 ]; then
+  partition="${ARC_B200_PARTITION:-b200_normal_q}"
 else
   partition="${gpu}_normal_q"
+fi
+# Owl and Tinkercliffs name their QOS by cluster prefix.
+case "$gpu" in b200) qos_prefix="owl_b200" ;; *) qos_prefix="tc_${gpu}" ;; esac
+
+if [ "$gpu" = b200 ]; then
+  case "$stage" in
+    grpo|sft|check) export CONDA_ENV="${CONDA_ENV:-$HOME/.conda/envs/vrr-train-b200}" ;;
+  esac
+  if [ "${DRY_RUN:-0}" != 1 ] && [[ "$(hostname)" != owl* ]]; then
+    echo "arc_submit: --b200 must be submitted from an Owl login node (ssh owl1.arc.vt.edu);" >&2
+    echo "            sbatch here would send it to $(hostname -s | sed 's/[0-9]*$//')." >&2
+    exit 1
+  fi
 fi
 
 # Wall time in minutes, from any SLURM time format: MM, MM:SS, HH:MM:SS,
@@ -95,9 +117,9 @@ to_minutes() {
 if [ -z "$qos" ]; then
   [ -n "$time" ] || time="$(sed -n 's/^#SBATCH --time=//p' "$script" | head -1)"
   if [ -n "$time" ] && [ "$(to_minutes "$time")" -le 1440 ]; then
-    qos="tc_${gpu}_normal_short"
+    qos="${qos_prefix}_normal_short"
   else
-    qos="tc_${gpu}_normal_base"
+    qos="${qos_prefix}_normal_base"
   fi
 fi
 
@@ -112,6 +134,7 @@ fi
 
 if [ "${DRY_RUN:-0}" = 1 ]; then
   [ "$gpu" = h200 ] && echo "NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-}"
+  [ "$gpu" = b200 ] && echo "CONDA_ENV=${CONDA_ENV:-}"
   printf '%q ' "${cmd[@]}"; echo
 else
   exec "${cmd[@]}"
