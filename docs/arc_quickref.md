@@ -88,6 +88,86 @@ take effect.
 
 ## Command shape
 
+Use `scripts/arc_submit.sh`. It fills in `--account`, `--partition`, `--qos`
+(short QOS when the job is 24h or less) and `--mail-user`, and sets
+`NCCL_SOCKET_IFNAME=eth0` on H200. Run-specific env vars go before it,
+ordinary sbatch flags after the stage, Python flags after `--`.
+
+```bash
+MODEL=7b SFT_CKPT=none NUM_GEN=4 GROUPS_PER_STEP=1 \
+  scripts/arc_submit.sh grpo --gres=gpu:1 --mem=120G --time=01:00:00 -- --max-steps 2 --logp-parity
+GROUPS_PER_STEP=8 scripts/arc_submit.sh grpo --h200 --time=02:00:00 -- --max-steps 5
+JOB=eval ADAPTER=<ckpt> scripts/arc_submit.sh infer --gres=gpu:2 --time=03:00:00
+DRY_RUN=1 scripts/arc_submit.sh grpo --h200        # print the sbatch line only
+```
+
+Plain `sbatch scripts/arc_<stage>.slurm` still works, but then the scheduling
+flags are yours to pass.
+
+## Defaults (no longer set per submit)
+
+`scripts/arc_env.sh` and the launchers now default to the current settings, so
+none of these need to be on the submit line:
+
+```
+VRR_DATASET=synth1024                      # namespaces data/, checkpoints/, logs/, results/
+OVERVIEW_LONG_EDGE=56                      # MUST match across every stage of a run
+HF_HOME=$HOME/hf_cache                     # token lives here too
+WANDB_DIR=$HOME/wandb                      # /projects/$USER is not writable
+CONDA_ENV                                  # per launcher: vrr-train (sft/grpo), vrr (infer),
+                                           # vrr / vrr-gen (synth caption / generate)
+MAX_INSPECTS=6                             # arc_grpo.slurm
+ARC_ACCOUNT=ece-6524-spring2026            # arc_submit.sh
+```
+
+Any of them can still be overridden on the submit line. For a permanent
+personal change, put `export NAME=value` in `~/.config/vrr/site.env` (outside
+the repo), e.g. `ARC_MAIL_USER`, or `ARC_GPU=h200` to default to H200.
+A wrong env now fails within seconds at `arc_require`, which imports the
+trainer module rather than bare `trl`.
+
+`NCCL_SOCKET_IFNAME=eth0` on H200 (`tc-xe*`) only. **Leave it unset on A100** —
+`arc_env.sh` probes for an addressed interface. `ib0` exists on H200 but has no
+IP, which is a silent 10-minute failure.
+
+## Partitions and QOS
+
+| partition | nodes | short QOS (prio / cap) | long QOS |
+|---|---|---|---|
+| `h200_normal_q` | 6 · `tc-xe[001-006]` · 141 GB | `tc_h200_normal_short` (2000 / 1 day) | `tc_h200_normal_base` (1000 / 7 d) |
+| `a100_normal_q` | 14 · `tc-dgx[001-010]`,`tc-gpu[001-004]` · 80 GB | `tc_a100_normal_short` (1500 / 1 day) | `tc_a100_normal_base` (1000 / 7 d) |
+
+"short" is a **full day** and the highest priority — use it for everything under
+24 h. A100s are 80 GB, so 32B training there needs offload — but use
+`DS=configs/deepspeed_zero3_offload_param.json`, NOT `zero3.json` or the full
+`zero3_offload.json`. ZeRO-3 alone still OOMs (every rank materialises the model
+during `from_pretrained`, before DeepSpeed partitions anything), and the full
+offload config forces `DeepSpeedCPUAdam`, which needs an `nvcc` the compute nodes
+do not expose. Parameter-only offload ran 32B SFT on 2×A100 in 3.9 h; pass
+`--mem=300G` for the pinned host memory.
+
+## `VAR=x sbatch` never errors on a name the launcher does not read
+
+The launchers only see variables they explicitly reference. Passing one they do
+not — `MAX_INSPECTS=6` to `arc_grpo.slurm` before it was wired — is accepted
+silently and dropped, and the job runs on the Python default instead. Nothing
+warns. Before relying on a variable, confirm the launcher reads it:
+
+```bash
+grep -n 'MAX_INSPECTS' scripts/arc_grpo.slurm
+```
+
+Passthrough flags after the script name (`... scripts/arc_grpo.slurm
+--max-inspects 6`) reach `argparse` directly and fail loudly on a typo, so they
+are the safer form when in doubt.
+
+Related: `.slurm` files are copied to the SLURM spool at SUBMIT time, so editing
+one does not affect an already-queued job — cancel and resubmit. Python files
+and `arc_env.sh` are read at RUN time and a `git pull` under a pending job does
+take effect.
+
+## Command shape
+
 Env vars before `sbatch`; sbatch flags; script; then any passthrough args to the
 Python entry point.
 

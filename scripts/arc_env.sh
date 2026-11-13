@@ -14,13 +14,20 @@
 # No `set -e` here on purpose: the module/conda probes below are allowed to fail
 # over to their alternatives. The .slurm files set it for the run itself.
 
+# ---- personal overrides ----------------------------------------------------- #
+# Defaults below are this project's current settings, so a plain submit needs no
+# variables. To change one for every job without editing this tracked file, put
+# `export NAME=value` lines in ~/.config/vrr/site.env (outside the repo). The
+# submit line still wins over both.
+[ -f "$HOME/.config/vrr/site.env" ] && source "$HOME/.config/vrr/site.env"
+
 # ---- site ----------------------------------------------------------------- #
-export ARC_ACCOUNT="${ARC_ACCOUNT:-personal}"        # sbatch --account
+export ARC_ACCOUNT="${ARC_ACCOUNT:-ece-6524-spring2026}"   # sbatch --account (see arc_submit.sh)
 export PROJECT_DIR="${PROJECT_DIR:-$SLURM_SUBMIT_DIR}"
 # Dataset namespace: every artifact (manifest, traces, checkpoints, episode
 # logs, results) lives under <root>/<VRR_DATASET>/, so substrates never
 # overwrite each other. Override per submit: VRR_DATASET=faces sbatch ...
-export VRR_DATASET="${VRR_DATASET:-genimage}"
+export VRR_DATASET="${VRR_DATASET:-synth1024}"
 # Overview resolution — the third difficulty axis, alongside degradation and
 # budget. INSPECT's zoom factor is native_size/this. Every launcher passes it, so
 # setting it here keeps a run's stages consistent with each other.
@@ -35,10 +42,15 @@ export VRR_DATASET="${VRR_DATASET:-genimage}"
 # Choose it by sweeping the FLOOR gate and taking the mildest blur whose AUC
 # confidence interval contains 0.5. The ceiling is measured at native resolution
 # and is unaffected, so only the floor needs re-running.
-export OVERVIEW_LONG_EDGE="${OVERVIEW_LONG_EDGE:-140}"
-# Model weights are tens to hundreds of GB — keep the HF cache on project/scratch
-# storage, never in $HOME (small quota, and it is not purged-but-fast storage).
-export HF_HOME="${HF_HOME:-/projects/$USER/hf_cache}"
+#
+# 56 is the synth1024 setting: the floor gate passed there (0.591 AUC), and every
+# stage of a run must use the same value.
+export OVERVIEW_LONG_EDGE="${OVERVIEW_LONG_EDGE:-56}"
+# Model weights are tens to hundreds of GB. On ARC /projects/$USER is not
+# writable for this account and /home has 640 GB, so the cache lives in $HOME.
+# The HF token is read from $HF_HOME/token: run `HF_HOME=$HOME/hf_cache hf auth login`
+# once on the login node.
+export HF_HOME="${HF_HOME:-$HOME/hf_cache}"
 export HF_HUB_ENABLE_HF_TRANSFER=1
 export TRANSFORMERS_VERBOSITY=warning
 export TOKENIZERS_PARALLELISM=false
@@ -58,7 +70,7 @@ export PYTHONUNBUFFERED=1
 export WANDB_PROJECT="${WANDB_PROJECT:-visual-reasoning-rlvr}"
 # Run dirs hold the offline event log; keep them off the small $HOME quota for
 # the same reason as HF_HOME.
-export WANDB_DIR="${WANDB_DIR:-/projects/$USER/wandb}"
+export WANDB_DIR="${WANDB_DIR:-$HOME/wandb}"
 export WANDB_CACHE_DIR="${WANDB_CACHE_DIR:-$WANDB_DIR/cache}"
 mkdir -p "$WANDB_DIR" 2>/dev/null || true
 # Never let a 48h job hang at startup on an unreachable W&B API.
@@ -171,7 +183,11 @@ arc_notify_finish() {
 module reset >/dev/null 2>&1 || true
 module load Miniforge3 >/dev/null 2>&1 || module load Anaconda3 >/dev/null 2>&1 || true
 
-export CONDA_ENV="${CONDA_ENV:-vrr}"
+# Each launcher names the env its stage needs in ARC_STAGE_ENV before sourcing
+# this file (vrr-train for sft/grpo, vrr for inference, vrr-gen for image
+# generation), so the right one is picked without CONDA_ENV on the submit line.
+# CONDA_ENV still overrides it; arc_require below catches a wrong choice.
+export CONDA_ENV="${CONDA_ENV:-${ARC_STAGE_ENV:-$HOME/miniconda3/envs/vrr}}"
 if [ -x "$CONDA_ENV/bin/python" ]; then
   # PY is the interpreter every launcher must use. Resolving `python` through
   # PATH proved unreliable on ARC — a bare `python` here ran, printed nothing and
@@ -218,7 +234,12 @@ except ImportError as e:
 # Each launcher calls this right after sourcing, naming the imports its stage
 # cannot run without:
 #
-#     arc_require trl peft          # arc_sft.slurm, arc_grpo.slurm
+#     arc_require trl.trainer.grpo_trainer peft    # arc_grpo.slurm
+#     arc_require trl.trainer.sft_trainer peft     # arc_sft.slurm
+#
+# Import the trainer module, not just `trl`: a bare `import trl` succeeds in
+# the vLLM env, and a GRPO job got past this check there on 2026-11-13. The
+# trainer modules pull in transformers 5.x and fail at once in `vrr`.
 #     arc_require vllm              # arc_infer.slurm
 #     arc_require diffusers         # arc_synth.slurm
 #
@@ -231,8 +252,8 @@ missing = []
 for m in mods:
     try:
         importlib.import_module(m)
-    except ImportError:
-        missing.append(m)
+    except Exception as e:   # trl in the wrong env raises ImportError from deep inside
+        missing.append("%s (%s: %s)" % (m, type(e).__name__, str(e).splitlines()[0][:120]))
 if missing:
     env = os.environ.get("CONDA_ENV", "?")
     sys.stderr.write(

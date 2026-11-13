@@ -41,8 +41,14 @@
 # default, and --partition on the sbatch line overrides it.
 
 set -euo pipefail
-mkdir -p logs/slurm "logs/${VRR_DATASET:-genimage}"
+# caption runs the VLM (vLLM env); generate needs diffusers (its own env).
+if [ "${STAGE:-caption}" = generate ]; then
+  ARC_STAGE_ENV="$HOME/miniconda3/envs/vrr-gen"
+else
+  ARC_STAGE_ENV="$HOME/miniconda3/envs/vrr"
+fi
 source "${SLURM_SUBMIT_DIR:-$PWD}/scripts/arc_env.sh"
+mkdir -p logs/slurm "logs/${VRR_DATASET}"
 
 # One launcher serves several stages, so a static #SBATCH --job-name makes
 # every one of them look identical in squeue. Directives cannot read env

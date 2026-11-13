@@ -51,11 +51,12 @@
 #   sbatch --mail-user=you@vt.edu scripts/arc_infer.slurm
 
 set -euo pipefail
-mkdir -p logs/slurm "logs/${VRR_DATASET:-genimage}"
+ARC_STAGE_ENV="$HOME/.conda/envs/vrr-train"   # default env for this stage; CONDA_ENV overrides
 # SLURM copies the batch script to its spool dir, so ${BASH_SOURCE[0]} does NOT
 # point into the repo — resolve against the submit dir instead.
 source "${SLURM_SUBMIT_DIR:-$PWD}/scripts/arc_env.sh"
-arc_require trl peft
+mkdir -p logs/slurm "logs/${VRR_DATASET}"
+arc_require trl.trainer.grpo_trainer peft
 
 trap arc_notify_finish EXIT
 arc_notify "<b>START</b> grpo ${SLURM_JOB_ID:-?} · ${VRR_DATASET:-?} · ${SLURM_JOB_NODELIST:-?}"
@@ -64,9 +65,8 @@ MODEL="${MODEL:-32b}"
 SFT_CKPT="${SFT_CKPT:-checkpoints/${VRR_DATASET}/sft-qwen2.5-vl-32b}"
 # SFT_CKPT=none trains a fresh LoRA on the base model. That is what the 1-GPU
 # smoke test uses, since the 32B SFT adapter cannot load onto the 7B:
-#   MODEL=7b SFT_CKPT=none NUM_GEN=4 GROUPS_PER_STEP=1 sbatch --gres=gpu:1 \
-#     --mem=120G --time=01:00:00 --qos=tc_a100_normal_short scripts/arc_grpo.slurm \
-#     --max-steps 2 --logp-parity
+#   MODEL=7b SFT_CKPT=none NUM_GEN=4 GROUPS_PER_STEP=1 scripts/arc_submit.sh grpo \
+#     --gres=gpu:1 --mem=120G --time=01:00:00 -- --max-steps 2 --logp-parity
 # It must print "[forward-probe] {... all True} images=N" and a
 # "[logp-parity]" line, or the full run is not worth submitting.
 [ "$SFT_CKPT" = none ] && SFT_CKPT=""
@@ -77,7 +77,7 @@ DEGRADATION="${DEGRADATION:-clean}"
 # with --max-inspects, and a policy that clears the gate at 6 has not been shown
 # to clear it at grpo.py's default of 4. Unset here once already: the launcher
 # accepted MAX_INSPECTS=6 on the command line and silently ignored it.
-MAX_INSPECTS="${MAX_INSPECTS:-}"
+MAX_INSPECTS="${MAX_INSPECTS:-6}"      # synth1024 gates and the 0.763 target were at 6
 GRAD_ACCUM="${GRAD_ACCUM:-}"                       # default: one GRPO group/step
 # Per-TURN generation budget. 640 was sized for the old prompt; the evidence
 # asymmetry paragraph and the three tag definitions ask for more writing per
