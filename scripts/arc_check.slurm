@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Ten-minute GPU sanity check for a training env on a new GPU type.
+# Short GPU sanity check for a training env on a new GPU type.
 #
 #   scripts/arc_submit.sh check --b200        # Owl B200, vrr-train-b200 env
 #   scripts/arc_submit.sh check               # A100, vrr-train env
@@ -13,7 +13,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-#SBATCH --time=00:10:00
+#SBATCH --time=00:20:00
 #SBATCH --output=logs/slurm/check-%j.out
 #SBATCH --error=logs/slurm/check-%j.err
 
