@@ -51,7 +51,7 @@ export OVERVIEW_LONG_EDGE="${OVERVIEW_LONG_EDGE:-56}"
 # The HF token is read from $HF_HOME/token: run `HF_HOME=$HOME/hf_cache hf auth login`
 # once on the login node.
 export HF_HOME="${HF_HOME:-$HOME/hf_cache}"
-export HF_HUB_ENABLE_HF_TRANSFER=1
+export HF_XET_HIGH_PERFORMANCE=1   # replaces the deprecated HF_HUB_ENABLE_HF_TRANSFER
 export TRANSFORMERS_VERBOSITY=warning
 export TOKENIZERS_PARALLELISM=false
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"

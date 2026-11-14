@@ -696,6 +696,34 @@ def _zero3_active() -> bool:
         return False
 
 
+def local_snapshot(model_name: str) -> str:
+    """Return a local directory holding ``model_name``, downloading it once per node.
+
+    Under torchrun every process calls from_pretrained at once. With the weights
+    not yet cached, all 8 processes start the same download and one reads the
+    half-written snapshot: "does not appear to have a file named
+    model.safetensors" (ARC job 8679157). Here the node's local main process
+    downloads while the others wait, then everyone loads from the same path.
+    A local directory is returned unchanged.
+    """
+    if os.path.isdir(model_name):
+        return model_name
+    from huggingface_hub import snapshot_download
+
+    def fetch() -> str:
+        return snapshot_download(
+            model_name,
+            allow_patterns=["*.json", "*.safetensors", "*.txt", "*.model", "*.jinja", "*.py"],
+        )
+
+    if not dist_info().is_distributed:
+        return fetch()
+    from accelerate import PartialState
+
+    with PartialState().local_main_process_first():
+        return fetch()
+
+
 def load_policy(
     model_name: str,
     adapter: str | None,
@@ -719,7 +747,7 @@ def load_policy(
     """
     from transformers import AutoModelForImageTextToText
 
-    model_name = resolve_model(model_name)
+    model_name = local_snapshot(resolve_model(model_name))
     processor = load_processor(model_name, min_pixels=min_pixels, max_pixels=max_pixels)
 
     kwargs = {"attn_implementation": attn_implementation or best_attn_implementation(device)}
