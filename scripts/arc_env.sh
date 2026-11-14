@@ -54,6 +54,9 @@ export HF_HOME="${HF_HOME:-$HOME/hf_cache}"
 export HF_XET_HIGH_PERFORMANCE=1   # replaces the deprecated HF_HUB_ENABLE_HF_TRANSFER
 export TRANSFORMERS_VERBOSITY=warning
 export TOKENIZERS_PARALLELISM=false
+# Rollouts allocate KV caches of varying length every turn; without this the
+# freed blocks fragment (an A100 32B run OOMed with 2.5 GB reserved but unused).
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 export PYTHONUNBUFFERED=1
 
