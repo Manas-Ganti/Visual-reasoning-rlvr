@@ -155,7 +155,7 @@ def test_prediction_tracking_empty_zero():
 # confident_wrong
 # --------------------------------------------------------------------------- #
 def test_confident_wrong_scaled_by_confidence():
-    cfg = RewardConfig()
+    cfg = RewardConfig(c_confident_wrong=0.5)
     t = traj_from_entries(TurnEntry(action_type="verdict", verdict=AI, confidence=0.8))
     assert confident_wrong_penalty(t, REAL, cfg) == pytest.approx(-0.5 * 0.8)
 
@@ -167,7 +167,7 @@ def test_confident_wrong_zero_when_correct():
 
 
 def test_confident_wrong_uses_default_confidence():
-    cfg = RewardConfig()
+    cfg = RewardConfig(c_confident_wrong=0.5)
     t = traj_from_entries(TurnEntry(action_type="verdict", verdict=AI, confidence=None))
     assert confident_wrong_penalty(t, REAL, cfg) == pytest.approx(-0.5 * cfg.default_confidence)
 
@@ -206,7 +206,9 @@ def test_confident_wrong_is_net_negative():
     total, b = compute_episode_reward(t, REAL)  # confidently AI but truth REAL
     assert total < 0
     assert b["verdict_correct"] == -1.0
-    assert b["confident_wrong"] < 0
+    # The cost of the confidence now comes from Brier, not confident_wrong.
+    assert b["belief_brier"] < 0
+    assert b["confident_wrong"] == 0.0
 
 
 def test_no_answer_penalized():
@@ -303,7 +305,7 @@ def test_brier_appears_in_the_breakdown_and_the_sum_still_reconciles():
 # proves very little. A wrong REAL is therefore the more culpable error.
 
 def test_wrong_real_costs_more_than_wrong_ai_at_equal_confidence():
-    cfg = RewardConfig()
+    cfg = RewardConfig(c_confident_wrong=0.5)
     wrong_real = confident_wrong_penalty(_traj_with_belief(0.1, REAL), AI, cfg)
     wrong_ai = confident_wrong_penalty(_traj_with_belief(0.9, AI), REAL, cfg)
     assert wrong_real < wrong_ai < 0
@@ -371,3 +373,34 @@ def test_run2_shaped_episode_no_longer_forfeits_reward():
     gap_now = (compute_episode_reward(tag_agreeing, AI)[1]["belief_coherence"]
                - compute_episode_reward(run2, REAL)[1]["belief_coherence"])
     assert gap_now == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# confidence is graded by a proper rule only (2026-11-15)
+# --------------------------------------------------------------------------- #
+def test_confident_wrong_is_off_by_default():
+    # Charging confidence only when wrong makes confidence 0 optimal at every
+    # accuracy: deflation, not calibration.
+    t = _traj_with_belief(0.95, AI)
+    assert confident_wrong_penalty(t, REAL, RewardConfig()) == 0.0
+
+
+def test_expected_reward_peaks_at_the_true_probability():
+    # The property the whole calibration argument rests on. If the evidence makes
+    # the image AI with probability q, reporting q beats both hedging and
+    # overclaiming, in expectation over the truth.
+    def expected(p, q):
+        r_ai, _ = compute_episode_reward(_traj_with_belief(p, AI), AI)
+        r_real, _ = compute_episode_reward(_traj_with_belief(p, AI), REAL)
+        return q * r_ai + (1 - q) * r_real
+
+    for q in (0.6, 0.7, 0.9):
+        grid = [i / 20 for i in range(10, 21)]          # beliefs 0.50 .. 1.00, verdict AI
+        best = max(grid, key=lambda p: expected(p, q))
+        assert best == pytest.approx(q, abs=0.05)
+
+
+def test_confidence_pays_when_right():
+    loud, _ = compute_episode_reward(_traj_with_belief(0.95, AI), AI)
+    hedge, _ = compute_episode_reward(_traj_with_belief(0.6, AI), AI)
+    assert loud - hedge > 0.2

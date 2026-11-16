@@ -73,7 +73,7 @@ proves very little.** The policy weighted both the same.
 | attempt | result | what it taught |
 |---|---|---|
 | GRPO, 600 steps (cycle 1) | 0.545 vs 0.513 base, p=0.23 | discrimination improved, prior did not move |
-| Brier term on P(fake), w=0.40 | confidence 0.92 → **0.98** | a proper scoring rule cannot teach hedging to a policy that never hedges |
+| Brier term on P(fake), w=0.40 | confidence 0.92 → **0.98** | a proper scoring rule cannot teach hedging to a policy that never hedges. Retried 2026-11-15 at w=0.80 with `confident_wrong` off, because the gradient now sees the images and the policy now hedges within a group (confidence 0.5–0.98 on one image) |
 | SFT class weighting at 65% AI | eval AI-rate **13.4%** vs 16.5% base | weighting the *training set* does not move the *policy's* prior |
 | `prediction_tracking`, w=0.10 | 91% CONFIRMED | paid for a verbal tic; now 0.0 |
 | `belief_coherence`, w=0.30 | 60.5% of CONFIRMED preceded a *falling* belief | the term and the policy disagreed on what the tag meant; it withheld 0.30 from 1,367 sound updates. Now 0.0 |

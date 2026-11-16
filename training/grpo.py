@@ -355,6 +355,13 @@ def main():
     ap.add_argument("--max-new-tokens", type=int, default=640,
                     help="640, not 320: distilling synth1024 showed ~28% of turns exceeding a 320-token budget mid-block, which loses the ACTION line and makes the turn unparseable — 80% of episodes were rejected for it. eval/harness.py already used 640; the rollout paths did not, so the policy was being cut off during training and not during evaluation.")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--save-steps", type=int, default=25,
+                    help="Checkpoint every N steps. 25, not 100: an epoch is ~157 steps at "
+                         "~8 min each, so a run killed at the wall-time limit loses at most "
+                         "~3.5 h, and steps 50/100/150 exist for held-out eval mid-run.")
+    ap.add_argument("--save-total-limit", type=int, default=8,
+                    help="Keep this many checkpoints (~2 GB each: LoRA + optimizer state). "
+                         "8 holds a whole 157-step epoch at --save-steps 25.")
     # ---- scale / parallelism ----
     ap.add_argument("--per-device-batch-size", type=int, default=1,
                     help="Episodes rolled out per GPU per micro-step.")
@@ -492,8 +499,8 @@ def main():
         # a 5-step run). Trajectories already go to the rank-0 trace log.
         log_completions=False,
         logging_steps=1,
-        save_steps=100,
-        save_total_limit=2,
+        save_steps=args.save_steps,
+        save_total_limit=args.save_total_limit,
         seed=args.seed,
         # Only rank 0 reports, and only if wandb actually came up — otherwise HF
         # would try to init it a second time and fail for the same reason.

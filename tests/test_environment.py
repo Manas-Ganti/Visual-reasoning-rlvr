@@ -123,7 +123,9 @@ def test_wrong_confident_verdict_negative_reward(manifest):
     assert term
     assert info["correct"] is False
     assert r < 0
-    assert info["reward_breakdown"]["confident_wrong"] < 0
+    assert info["reward_breakdown"]["verdict_correct"] == -1.0
+    # Confidence is graded by Brier on P(fake) now; confident_wrong is retired.
+    assert info["reward_breakdown"]["confident_wrong"] == 0.0
 
 
 def test_budget_exhaustion_then_truncation(manifest):

@@ -64,13 +64,17 @@ Every term is a mechanical function of the trajectory + ground-truth label
 
 ```
 R = +1.00·verdict_correct        final label vs ground truth
-    +0.30·belief_coherence       P(fake) moved as the agent's own reconciliations imply
+    +0.80·belief_brier           1 − 2(P(fake) − y)², a proper scoring rule on the final belief
     +0.30·verdict_consistency    the final call follows the accumulated evidence
-    +0.10·prediction_tracking    (soft) fraction of hypotheses confirmed
     −0.05·per_inspect            budget pressure → hypothesis-driven, not exhaustive
-    −0.50·confident_wrong·conf    calibration pressure → hedge when indistinguishable
     −1.00·no_answer
+     0.00·belief_coherence       retired: the tags did not mean what it assumed (run 2)
+     0.00·prediction_tracking    retired: paid for always writing CONFIRMED (run 1)
+     0.00·confident_wrong        retired: charging confidence only when wrong makes 0 optimal
 ```
+
+Confidence is graded by Brier alone. Being proper, it is maximised by stating
+one's true belief, so neither hedging nor overclaiming can profit.
 
 `verdict_correct` dominates so process credit can never rescue a confidently-wrong
 episode. The reward reads only numeric beliefs and reconciliation *direction* —

@@ -61,7 +61,12 @@ class RewardConfig:
 
     # Positive terms
     w_correct: float = 1.0             # ±this on a right / wrong verdict
-    w_belief_brier: float = 0.40       # proper scoring rule on the FINAL P(fake)
+    # Was 0.40. At 0.40 the term was worth ~0.04 reward between an honest and an
+    # overconfident belief, against a ±1 verdict swing, so GRPO's within-group
+    # advantage never saw it; measured Brier on the B200 calibration (2026-11-14)
+    # was 0.352, worse than always saying 0.5. Doubled, and it now carries ALL the
+    # confidence pressure (c_confident_wrong is 0.0, below).
+    w_belief_brier: float = 0.80       # proper scoring rule on the FINAL P(fake)
     # Was 0.30, now off. It asks whether P(fake) moved in the direction the
     # RECONCILIATION tag implies — sound in principle, but the tag did not mean
     # what the term assumed. In GRPO run 2, 60.5% of CONFIRMED reconciliations
@@ -82,7 +87,15 @@ class RewardConfig:
 
     # Cost / penalty terms (subtracted)
     c_action: float = 0.05             # per inspect — budget pressure
-    c_confident_wrong: float = 0.50    # scaled by stated confidence on a wrong call
+    # Was 0.50, now off. It charged confidence on a wrong verdict and paid nothing
+    # for confidence on a right one, so whatever the policy's accuracy, expected
+    # reward was highest at confidence 0: an improper rule that deflates stated
+    # confidence instead of calibrating it, and the eval calibration curve reads
+    # exactly this field. Brier on P(fake) is proper and now does the job alone.
+    # The REAL multiplier below only matters if this is re-enabled; it was the
+    # tool against run 1's REAL collapse, and recall is balanced now (0.57 AI /
+    # 0.59 REAL on the calibration). Restore both if the AI-rate drifts low.
+    c_confident_wrong: float = 0.0     # scaled by stated confidence on a wrong call
     # Evidence here is asymmetric: finding an artifact PROVES AI, while finding
     # none across a fraction of the grid proves very little. A confident REAL is
     # therefore a weaker claim than a confident AI and should cost more when it
