@@ -46,6 +46,11 @@ export VRR_DATASET="${VRR_DATASET:-synth1024}"
 # 56 is the synth1024 setting: the floor gate passed there (0.591 AUC), and every
 # stage of a run must use the same value.
 export OVERVIEW_LONG_EDGE="${OVERVIEW_LONG_EDGE:-56}"
+# Per-turn token cap, shared by GRPO rollouts and eval/probes so a turn that fits
+# in training also fits in evaluation. 900, not the scripts' 640 default: the
+# cycle-3 prompt pushes turns past 640, cutting them off before the ACTION line
+# (results/grpo_run3.md). GRPO logs rollout/turn_capped_rate to catch a regression.
+export MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-900}"
 # Model weights are tens to hundreds of GB. On ARC /projects/$USER is not
 # writable for this account and /home has 640 GB, so the cache lives in $HOME.
 # The HF token is read from $HF_HOME/token: run `HF_HOME=$HOME/hf_cache hf auth login`

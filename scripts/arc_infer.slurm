@@ -98,6 +98,7 @@ case "$JOB" in
       --images "${IMAGES:-32}" -G "${G:-8}" \
       --degradation "${DEGRADATION:-clean}" \
       --max-inspects "${MAX_INSPECTS:-4}" \
+      ${MAX_NEW_TOKENS:+--max-new-tokens "$MAX_NEW_TOKENS"} \
       --overview-long-edge "$OVERVIEW_LONG_EDGE" "$@"
     ;;
   distill)
@@ -120,6 +121,7 @@ case "$JOB" in
       ${ADAPTER:+--adapter "$ADAPTER"} ${ADAPTER:+--compare-base} \
       --budgets "${BUDGETS:-2,4}" \
       --degradations "${DEGRADATIONS:-clean,jpeg,blur_downscale}" \
+      ${MAX_NEW_TOKENS:+--max-new-tokens "$MAX_NEW_TOKENS"} \
       ${LIMIT:+--limit "$LIMIT"} \
       --trace-log "${TRACE_LOG:-logs/$VRR_DATASET/eval_episodes.jsonl}" \
       --overview-long-edge "$OVERVIEW_LONG_EDGE" "$@"

@@ -1140,6 +1140,11 @@ class HFPolicy:
                 "prompt_ids": inputs["input_ids"][i][mask].tolist() if collect_tokens else [],
                 "token_ids": row.tolist() if collect_tokens else [],
                 "logprobs": trans[i, :n].tolist() if trans is not None else [],
+                # No EOS and no completed ACTION line: the turn ran into
+                # max_new_tokens and was cut off. TRL's completions/clipped_ratio
+                # cannot see this (it flags every turn that stops at the ACTION
+                # line, before <|im_end|>), so it is counted here.
+                "hit_token_cap": ends[i] is None,
             })
         return results
 
@@ -1361,7 +1366,7 @@ def run_episodes_batched(
                 obs = envs[slot]._observation()
             slots[slot] = {"job": job_i, "obs": obs, "turns": 0, "return": 0.0,
                            "prompt_ids": None, "completion_ids": [], "logprobs": [],
-                           "turn_log": [], "images": []}
+                           "turn_log": [], "images": [], "capped": 0}
         if not slots:
             break
 
@@ -1390,6 +1395,7 @@ def run_episodes_batched(
                 st["logprobs"].extend(out.get("logprobs") or [])
             obs, reward, terminated, truncated, info = envs[slot].step(out["text"])
             st["obs"], st["turns"] = obs, st["turns"] + 1
+            st["capped"] += int(bool(out.get("hit_token_cap")))
             st["return"] += reward
             if terminated or truncated or st["turns"] >= max_turns:
                 res = episode_result(info, st["return"], st["prompt_ids"],
@@ -1400,6 +1406,7 @@ def run_episodes_batched(
                                logprobs=full["logprobs"], env_mask=full["env_mask"],
                                retok_mismatch=full["retok_mismatch"], turns=len(st["turn_log"]),
                                images=st["images"])
+                res["turns_capped"] = st["capped"]
                 results[st["job"]] = res
                 if on_episode is not None:
                     on_episode(envs[slot], res)

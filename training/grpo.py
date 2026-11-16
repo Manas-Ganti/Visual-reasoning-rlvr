@@ -48,7 +48,7 @@ class EpisodeMetrics:
 
     def __init__(self):
         self.n = self.correct = self.answered = self.steps = self.inspects = 0
-        self.turns = self.retok_mismatch = 0
+        self.turns = self.retok_mismatch = self.turns_capped = 0
         self.reward_sum = 0.0
 
     def add(self, ep: dict):
@@ -64,6 +64,7 @@ class EpisodeMetrics:
             "n": self.n, "reward_sum": self.reward_sum, "correct": self.correct,
             "answered": self.answered, "steps": self.steps, "inspects": self.inspects,
             "turns": self.turns, "retok_mismatch": self.retok_mismatch,
+            "turns_capped": self.turns_capped,
         }
 
     @staticmethod
@@ -81,6 +82,10 @@ class EpisodeMetrics:
             # Turns whose sampled ids differ from the template's re-encoding of
             # the same text (see common.assemble_episode). Near 0 is expected.
             "rollout/retok_mismatch_rate": tot.get("retok_mismatch", 0) / max(tot.get("turns", 0), 1),
+            # Turns cut off at --max-new-tokens before their ACTION line. Run 3
+            # needed 900 tokens for this to stay near 0; a rise means the cap is
+            # eating answers (an unparseable turn scores as a format failure).
+            "rollout/turn_capped_rate": tot.get("turns_capped", 0) / max(tot.get("turns", 0), 1),
         }
 
 
@@ -146,6 +151,7 @@ def make_rollout_func(envs, processor, max_turns, degradation, trace_logger, arg
         turns = sum(ep["turns"] for ep in episodes)
         metrics.retok_mismatch += sum(ep["retok_mismatch"] for ep in episodes)
         metrics.turns += turns
+        metrics.turns_capped += sum(ep.get("turns_capped", 0) for ep in episodes)
 
         # Rank-local counters → one global summary, so the printed/logged rollout
         # metrics describe the whole data-parallel batch, not just this rank's slice.
@@ -482,7 +488,9 @@ def main():
         deepspeed=args.deepspeed,
         ddp_find_unused_parameters=False,
         max_completion_length=args.max_new_tokens,
-        log_completions=True,
+        # Off: TRL prints every completion as a console table (13 MB of log for
+        # a 5-step run). Trajectories already go to the rank-0 trace log.
+        log_completions=False,
         logging_steps=1,
         save_steps=100,
         save_total_limit=2,

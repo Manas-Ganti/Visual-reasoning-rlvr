@@ -112,6 +112,7 @@ none of these need to be on the submit line:
 ```
 VRR_DATASET=synth1024                      # namespaces data/, checkpoints/, logs/, results/
 OVERVIEW_LONG_EDGE=56                      # MUST match across every stage of a run
+MAX_NEW_TOKENS=900                         # per-turn cap, GRPO and eval alike
 HF_HOME=$HOME/hf_cache                     # token lives here too
 WANDB_DIR=$HOME/wandb                      # /projects/$USER is not writable
 VRR_ENV                                    # per launcher: vrr-train (sft/grpo; vrr-train-b200

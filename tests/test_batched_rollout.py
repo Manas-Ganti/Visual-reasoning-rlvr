@@ -135,3 +135,27 @@ def test_slots_refill_when_jobs_outnumber_envs():
 def test_batch_shrinks_as_episodes_finish():
     _, policy = run([0, 1, 2, 3], n_envs=4)
     assert policy.batch_sizes == [4, 3, 2, 1]
+
+
+class CappedPolicy(FakePolicy):
+    """Every INSPECT turn of episode 2 reports hitting the token cap."""
+
+    def act_batch(self, obs_list, **kw):
+        out = super().act_batch(obs_list, **kw)
+        for o, r in zip(obs_list, out):
+            r["hit_token_cap"] = o["index"] == 2 and "INSPECT" in r["text"]
+        return out
+
+
+def test_turns_that_hit_the_token_cap_are_counted_per_episode():
+    # TRL's clipped_ratio flags every turn that stops at the ACTION line, so a
+    # real cut-off is only visible through this count (rollout/turn_capped_rate).
+    envs = [FakeEnv() for _ in range(3)]
+    res = run_episodes_batched(CappedPolicy(), envs, [(i, "clean") for i in (0, 2, 1)],
+                               max_turns=10, sample=True, collect_tokens=True)
+    assert [r["turns_capped"] for r in res] == [0, 2, 0]
+
+
+def test_policy_without_the_flag_counts_zero():
+    res, _ = run([1, 2], n_envs=2)
+    assert [r["turns_capped"] for r in res] == [0, 0]
