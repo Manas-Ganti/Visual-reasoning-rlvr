@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Stage 2 — GRPO on ARC. Defaults: two 8-GPU nodes, 32B, ZeRO-2.
 #
-#   SFT_CKPT=checkpoints/sft-qwen2.5-vl-32b sbatch scripts/arc_grpo.slurm
+#   SFT_CKPT=checkpoints/synth1024/sft-qwen2.5-vl-32b-c3 sbatch scripts/arc_grpo.slurm
 #   MAX_INSPECTS=6 SFT_CKPT=... sbatch scripts/arc_grpo.slurm   # match the gate
 #   sbatch --nodes=2 scripts/arc_grpo.slurm          # two nodes, ~half the wall clock
 #
@@ -62,7 +62,10 @@ trap arc_notify_finish EXIT
 arc_notify "<b>START</b> grpo ${SLURM_JOB_ID:-?} · ${VRR_DATASET:-?} · ${SLURM_JOB_NODELIST:-?}"
 
 MODEL="${MODEL:-32b}"
-SFT_CKPT="${SFT_CKPT:-checkpoints/${VRR_DATASET}/sft-qwen2.5-vl-32b}"
+# Default: the cycle-3 SFT (2026-09-15), the newest and the only one trained on
+# the current prompts. The unsuffixed sft-qwen2.5-vl-32b was from 2026-08-24 and
+# predated the run-2/3 prompt and reward changes; it was deleted 2026-11-15.
+SFT_CKPT="${SFT_CKPT:-checkpoints/${VRR_DATASET}/sft-qwen2.5-vl-32b-c3}"
 # SFT_CKPT=none trains a fresh LoRA on the base model. That is what the 1-GPU
 # smoke test uses, since the 32B SFT adapter cannot load onto the 7B:
 #   MODEL=7b SFT_CKPT=none NUM_GEN=4 GROUPS_PER_STEP=1 scripts/arc_submit.sh grpo \

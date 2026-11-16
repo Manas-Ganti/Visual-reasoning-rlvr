@@ -559,7 +559,7 @@ the SFT checkpoint, and an `afterok` dependency cannot express "stop if this
 number is too low" — which is the whole point when the next stage costs 48 hours:
 
 ```bash
-JOB=groupvar ADAPTER=checkpoints/synth1024/sft-qwen2.5-vl-32b ... scripts/arc_infer.slurm
+JOB=groupvar ADAPTER=checkpoints/synth1024/sft-qwen2.5-vl-32b-c3 ... scripts/arc_infer.slurm
 # want usable_groups >= 0.40
 ```
 
