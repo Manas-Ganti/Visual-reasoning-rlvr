@@ -63,6 +63,11 @@ class VLLMPolicy:
             limit_mm_per_prompt={"image": max_images_per_prompt},
             mm_processor_kwargs=_pixel_kwargs(min_pixels, max_pixels),
             dtype="bfloat16",
+            # vLLM's custom all-reduce shares buffers over CUDA IPC. On a partial
+            # DGX allocation under SLURM it dies during warmup with
+            # "custom_all_reduce.cuh:453 'invalid argument'" (Tinkercliffs job,
+            # TP=2, 2026-11-17). NCCL all-reduce is near-free at TP<=8 here.
+            disable_custom_all_reduce=True,
             enable_lora=bool(adapter),
             max_lora_rank=max_lora_rank,
             seed=seed,
