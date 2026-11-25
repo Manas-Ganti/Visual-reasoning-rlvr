@@ -24,6 +24,14 @@ cap, and a turn cut off before its ACTION line is unparseable.
 
 ## And it made no difference
 
+> **Suspect (2026-11-24).** vLLM 0.8.5 was found to drop the 192 vision-tower tensors
+> in `sft-qwen2.5-vl-32b-c3`, and may have dropped the language tensors too
+> (`vllm_backend.keys_vllm_drops`; check the key names). So every number scored
+> **in vLLM with an adapter** may describe the base model more than the policy:
+> the SFT (c3) and GRPO (c3) columns below, their McNemar tests, and the budget curve.
+> Base-model numbers and HF rollouts (training accuracy, trajectories) are unaffected.
+> Re-score with `EVAL_BACKEND=hf`. The GRPO c3 adapter was deleted on 2026-11-19 and cannot be.
+
 | held-out, clean, budget 2 | base | SFT (c3) | GRPO (c3) |
 |---|---|---|---|
 | accuracy | 0.404 | 0.417 | **0.385** |

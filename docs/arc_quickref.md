@@ -97,7 +97,8 @@ ordinary sbatch flags after the stage, Python flags after `--`.
 MODEL=7b SFT_CKPT=none NUM_GEN=4 GROUPS_PER_STEP=1 \
   scripts/arc_submit.sh grpo --gres=gpu:1 --mem=120G --time=01:00:00 -- --max-steps 2 --logp-parity
 GROUPS_PER_STEP=8 scripts/arc_submit.sh grpo --h200 --time=02:00:00 -- --max-steps 5
-JOB=eval ADAPTER=<ckpt> scripts/arc_submit.sh infer --gres=gpu:2 --time=03:00:00
+# adapters: HF backend, training env (vLLM drops LoRA tensors and refuses them)
+JOB=eval EVAL_BACKEND=hf ADAPTER=<ckpt> BUDGETS=6 DEGRADATIONS=clean scripts/arc_submit.sh infer --b200 --gres=gpu:4 --cpus-per-task=16 --mem=400G --time=04:00:00
 DRY_RUN=1 scripts/arc_submit.sh grpo --h200        # print the sbatch line only
 ```
 

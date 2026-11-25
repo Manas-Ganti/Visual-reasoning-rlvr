@@ -345,6 +345,8 @@ def init_distributed(backend: str = "nccl") -> DistInfo:
     if not info.is_distributed:
         return info
 
+    import datetime
+
     import torch
     import torch.distributed as dist
 
@@ -353,7 +355,9 @@ def init_distributed(backend: str = "nccl") -> DistInfo:
     elif backend == "nccl":
         backend = "gloo"
     if not dist.is_initialized():
-        dist.init_process_group(backend=backend)
+        # Ranks finish their shards minutes apart and the early ones wait in
+        # gather_lists; NCCL's default 10-minute timeout would kill the job.
+        dist.init_process_group(backend=backend, timeout=datetime.timedelta(hours=2))
     return info
 
 
@@ -786,13 +790,18 @@ def load_policy(
     return model, processor
 
 
+# PEFT fullmatches this against module names ("model.visual.blocks.0.mlp.up_proj").
+VISION_MODULES = r"(.*\.)?visual\..*"
+
+
 def lora_config(r: int = 32, alpha: int | None = None, dropout: float = 0.05, target: str = "all-linear"):
     """LoRA config shared by SFT and GRPO.
 
     ``target="all-linear"`` covers attention *and* MLP projections of the language
-    tower; the Qwen2.5-VL vision blocks use different module names (``qkv``,
-    ``proj``, ``fc1/fc2``) so they stay frozen, which is what we want — the visual
-    encoder is not what needs to learn the investigation policy. Rank 32 (vs the
+    tower. The vision tower is excluded BY NAME: its MLPs are also called
+    ``gate_proj/up_proj/down_proj``, so before 2026-11-24 every adapter (including
+    sft-c3) trained 96 LoRA pairs inside it, which vLLM then dropped at eval.
+    Loading an old adapter is unaffected: it carries its own config. Rank 32 (vs the
     old 16) is the cheap half of the 7B→32B upgrade: more capacity for the
     format + policy without touching optimizer memory much.
     """
@@ -807,6 +816,7 @@ def lora_config(r: int = 32, alpha: int | None = None, dropout: float = 0.05, ta
         lora_alpha=alpha if alpha is not None else 2 * r,
         lora_dropout=dropout,
         target_modules=modules,
+        exclude_modules=VISION_MODULES,
         task_type="CAUSAL_LM",
     )
 

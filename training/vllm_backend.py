@@ -22,8 +22,54 @@ one vLLM process per node (TP = GPUs on that node) with the manifest split by
 from __future__ import annotations
 
 import contextlib
+import json
+import os
+import struct
 
 from training import common
+
+
+def adapter_keys(adapter: str) -> list[str]:
+    """Tensor names in a LoRA checkpoint, read from the safetensors header only."""
+    path = os.path.join(adapter, "adapter_model.safetensors")
+    with open(path, "rb") as f:
+        header = json.loads(f.read(struct.unpack("<Q", f.read(8))[0]))
+    return [k for k in header if k != "__metadata__"]
+
+
+def keys_vllm_drops(keys: list[str]) -> list[str]:
+    """Adapter tensors that vLLM 0.8.5 would silently ignore for Qwen2.5-VL.
+
+    It applies LoRA to the language model only, and finds each layer by name after
+    rewriting a leading ``model.`` to ``language_model.model.``. A name that matches
+    no layer is not an error: that layer just runs without its LoRA. So two kinds
+    vanish: vision-tower tensors, and transformers-5 names
+    (``model.language_model.layers...``), which map to a layer that does not exist.
+    """
+    dropped = []
+    for key in keys:
+        name = key.replace("base_model.model.", "")
+        if name.startswith("model."):
+            name = "language_model." + name
+        if not name.startswith("language_model.model.layers."):
+            dropped.append(key)
+    return dropped
+
+
+def require_vllm_can_serve(adapter: str) -> None:
+    """Refuse an adapter vLLM would only partly apply, instead of scoring the wrong model."""
+    try:
+        keys = adapter_keys(adapter)
+    except FileNotFoundError as e:
+        raise SystemExit(f"Cannot verify adapter {adapter!r} for vLLM: {e}") from e
+    dropped = keys_vllm_drops(keys)
+    if dropped:
+        raise SystemExit(
+            f"vLLM would silently drop {len(dropped)} of {len(keys)} tensors in {adapter} "
+            f"(e.g. {dropped[0]}), so it would score a different model from the one trained. "
+            "Evaluate with HF instead: JOB=eval EVAL_BACKEND=hf (scripts/arc_infer.slurm), "
+            "or merge the adapter first (merge_adapter)."
+        )
 
 
 class VLLMPolicy:
@@ -47,6 +93,8 @@ class VLLMPolicy:
         max_pixels: int | None = common.DEFAULT_MAX_PIXELS,
         seed: int = 0,
     ):
+        if adapter:
+            require_vllm_can_serve(adapter)   # before spending minutes on weights
         from vllm import LLM
 
         self.model_name = common.resolve_model(model)
@@ -64,9 +112,9 @@ class VLLMPolicy:
             mm_processor_kwargs=_pixel_kwargs(min_pixels, max_pixels),
             dtype="bfloat16",
             # vLLM's custom all-reduce shares buffers over CUDA IPC. On a partial
-            # DGX allocation under SLURM it dies during warmup with
-            # "custom_all_reduce.cuh:453 'invalid argument'" (Tinkercliffs job,
-            # TP=2, 2026-11-17). NCCL all-reduce is near-free at TP<=8 here.
+            # DGX allocation under SLURM a job died during warmup with
+            # "custom_all_reduce.cuh:453 'invalid argument'" (Tinkercliffs,
+            # TP=2, 2026-11-17). Root cause unproven; NCCL is the safe path.
             disable_custom_all_reduce=True,
             enable_lora=bool(adapter),
             max_lora_rank=max_lora_rank,

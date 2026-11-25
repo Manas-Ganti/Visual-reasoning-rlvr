@@ -44,12 +44,20 @@
 #   sbatch --mail-user=you@vt.edu scripts/arc_infer.slurm
 
 set -euo pipefail
-ARC_STAGE_ENV="$HOME/miniconda3/envs/vrr"   # default env for this stage; CONDA_ENV overrides
+# EVAL_BACKEND=hf (JOB=eval only): one HF replica per GPU in the training env, so
+# the whole adapter is applied. vLLM drops part of these adapters and now refuses them.
+EVAL_BACKEND="${EVAL_BACKEND:-vllm}"
+case "$EVAL_BACKEND" in
+  vllm) ARC_STAGE_ENV="$HOME/miniconda3/envs/vrr" ;;        # VRR_ENV overrides
+  hf)   ARC_STAGE_ENV="$HOME/.conda/envs/vrr-train"         # -b200 on B200, see arc_env.sh
+        [ "${JOB:-eval}" = eval ] || { echo "EVAL_BACKEND=hf only supports JOB=eval" >&2; exit 1; } ;;
+  *) echo "EVAL_BACKEND must be vllm or hf" >&2; exit 1 ;;
+esac
 # SLURM copies the batch script to its spool dir, so ${BASH_SOURCE[0]} does NOT
 # point into the repo — resolve against the submit dir instead.
 source "${SLURM_SUBMIT_DIR:-$PWD}/scripts/arc_env.sh"
 mkdir -p logs/slurm "logs/${VRR_DATASET}"
-arc_require vllm
+if [ "$EVAL_BACKEND" = hf ]; then arc_require transformers peft; else arc_require vllm; fi
 
 # One launcher serves several stages, so a static #SBATCH --job-name makes
 # every one of them look identical in squeue. Directives cannot read env
@@ -62,6 +70,8 @@ arc_notify "<b>START</b> ${JOB:-eval} ${SLURM_JOB_ID:-?} · ${VRR_DATASET:-?} ·
 JOB="${JOB:-eval}"
 MODEL="${MODEL:-32b}"
 TP="${TP:-$GPUS_PER_NODE}"
+# HF batches per GPU; 8 is what GRPO rollouts run at.
+if [ "$EVAL_BACKEND" = hf ]; then BATCH_EPISODES="${BATCH_EPISODES:-8}"; fi
 BATCH_EPISODES="${BATCH_EPISODES:-32}"
 LIMIT="${LIMIT:-}"
 
@@ -115,8 +125,13 @@ case "$JOB" in
       --overview-long-edge "$OVERVIEW_LONG_EDGE" "$@"
     ;;
   eval)
-    "$PY" eval/harness.py \
-      --model "$MODEL" --backend vllm --tensor-parallel-size "$TP" \
+    if [ "$EVAL_BACKEND" = hf ]; then
+      run_eval=(arc_torchrun eval/harness.py --backend hf)
+    else
+      run_eval=("$PY" eval/harness.py --backend vllm --tensor-parallel-size "$TP")
+    fi
+    "${run_eval[@]}" \
+      --model "$MODEL" \
       --batch-episodes "$BATCH_EPISODES" \
       ${ADAPTER:+--adapter "$ADAPTER"} ${ADAPTER:+--compare-base} \
       --budgets "${BUDGETS:-2,4}" \
